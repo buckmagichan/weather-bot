@@ -1,0 +1,67 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "go: run weather app",
+      "type": "shell",
+      "command": "go run ./cmd/app",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "go: test all",
+      "type": "shell",
+      "command": "go test ./... -v",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "go: tidy",
+      "type": "shell",
+      "command": "go mod tidy",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "docker: start postgres",
+      "type": "shell",
+      "command": "docker compose --env-file .env -f infra/docker-compose.postgres.yml up -d",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "docker: stop postgres",
+      "type": "shell",
+      "command": "docker compose --env-file .env -f infra/docker-compose.postgres.yml down",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "docker: postgres logs",
+      "type": "shell",
+      "command": "docker compose --env-file .env -f infra/docker-compose.postgres.yml logs -f postgres",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    }
+  ]
+}

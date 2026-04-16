@@ -1,0 +1,39 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go build output
+/cmd/app/app
+
+# Dependency directory (if vendoring)
+/vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment variable files
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+/.idea
+/.vscode/launch.json
+*.sublime-workspace
+*.swp
+*.swo
+
+# Claude Code
+.claude
+
+# Temp
+.temp
+.tmp

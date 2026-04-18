@@ -2,12 +2,12 @@ package domain
 
 import "time"
 
-// ObservationSnapshot is a single hourly weather observation for a station.
-// Nullable fields use pointers because Meteostat frequently omits variables
-// for sparse stations or time periods with no sensor data.
+// ObservationSnapshot is a single weather observation for a station.
+// Nullable fields use pointers because upstream providers may omit ancillary
+// variables for some stations or time periods.
 //
-// CloudCover stores the WMO weather condition code (coco, 1–27) returned by
-// Meteostat. This is a discrete condition code, not a cloud-cover percentage.
+// CloudCover is optional provider-specific cloud metadata; when populated it is
+// not necessarily a percentage.
 type ObservationSnapshot struct {
 	StationCode string
 	ObservedAt  time.Time // wall-clock time in the station's local timezone
@@ -16,6 +16,6 @@ type ObservationSnapshot struct {
 	TempC      float64  // temperature in °C (always present)
 	DewPointC  *float64 // dew point in °C
 	WindKMH    *float64 // wind speed in km/h
-	CloudCover *int     // WMO condition code (1 = clear sky … 27 = heavy storm)
+	CloudCover *int     // optional provider-specific cloud metadata
 	PrecipMM   *float64 // precipitation in mm
 }

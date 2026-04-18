@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"math"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 // TemperatureBucketDistribution using deterministic rule-based logic.
 // It has no DB dependencies and never returns an error.
 type BuildBucketDistributionService struct{}
+
+const (
+	bucketFloorC   = 17
+	bucketCeilingC = 25
+)
 
 // NewBuildBucketDistributionService creates a BuildBucketDistributionService.
 func NewBuildBucketDistributionService() *BuildBucketDistributionService {
@@ -27,8 +33,13 @@ func (s *BuildBucketDistributionService) Build(
 		panic("BuildBucketDistributionService.Build: summary must not be nil")
 	}
 	adjusted := adjustedHigh(summary)
+	if summary.ObservedHighSoFarC != nil && adjusted < *summary.ObservedHighSoFarC {
+		// The final daily high cannot be below a temperature we have already
+		// observed, so clamp the point estimate to that hard lower bound.
+		adjusted = *summary.ObservedHighSoFarC
+	}
 	spread := computeSpread(summary)
-	probs := bucketProbabilities(adjusted, spread)
+	probs := bucketProbabilities(adjusted, spread, summary.ObservedHighSoFarC)
 	conf := computeConfidence(summary)
 
 	return &domain.TemperatureBucketDistribution{
@@ -102,29 +113,141 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 	}
 }
 
-// bucketProbabilities computes the probability of four temperature buckets
-// using a Gaussian CDF centred on adjustedC with standard deviation sigma.
+// bucketProbabilities computes a fine-grained probability distribution over
+// integer temperature buckets using a Gaussian CDF centred on adjustedC with
+// standard deviation sigma.
 //
-// Bucket boundaries (half-integer midpoints between bucket labels):
+// Bucket boundaries use half-integer midpoints between neighbouring integer
+// labels. With the current fixed range:
 //
-//	"17C or below"  →  X ≤ 17.5
-//	"18C"           →  17.5 < X ≤ 18.5
-//	"19C"           →  18.5 < X ≤ 19.5
-//	"20C or above"  →  X > 19.5
+//	"17C or below" →  X ≤ 17.5
+//	"18C"          →  17.5 < X ≤ 18.5
+//	...
+//	"24C"          →  23.5 < X ≤ 24.5
+//	"25C or above" →  X > 24.5
 //
 // Because the probabilities are derived from a CDF, they sum to exactly 1.0.
-func bucketProbabilities(adjustedC, sigma float64) []domain.BucketProbability {
-	cdf175 := normalCDF(17.5, adjustedC, sigma)
-	cdf185 := normalCDF(18.5, adjustedC, sigma)
-	cdf195 := normalCDF(19.5, adjustedC, sigma)
+func bucketProbabilities(adjustedC, sigma float64, observedHigh *float64) []domain.BucketProbability {
+	buckets := temperatureBuckets()
 
-	return []domain.BucketProbability{
-		{Label: "17C or below", Prob: cdf175},
-		{Label: "18C", Prob: cdf185 - cdf175},
-		{Label: "19C", Prob: cdf195 - cdf185},
-		{Label: "20C or above", Prob: 1 - cdf195},
+	if observedHigh == nil {
+		probs := make([]domain.BucketProbability, 0, len(buckets))
+		for _, bucket := range buckets {
+			probs = append(probs, domain.BucketProbability{
+				Label: bucket.Label,
+				Prob:  intervalProbability(bucket.Lo, bucket.Hi, adjustedC, sigma),
+			})
+		}
+		return probs
+	}
+
+	lower := *observedHigh
+	survival := 1 - normalCDF(lower, adjustedC, sigma)
+	if survival <= 0 {
+		probs := make([]domain.BucketProbability, 0, len(buckets))
+		for _, bucket := range buckets {
+			prob := 0.0
+			if bucket.Hi == nil {
+				prob = 1.0
+			}
+			probs = append(probs, domain.BucketProbability{
+				Label: bucket.Label,
+				Prob:  prob,
+			})
+		}
+		return probs
+	}
+
+	probs := make([]domain.BucketProbability, 0, len(buckets))
+	for _, bucket := range buckets {
+		probs = append(probs, domain.BucketProbability{
+			Label: bucket.Label,
+			Prob:  conditionalIntervalProb(bucket.Lo, bucket.Hi, lower, adjustedC, sigma, survival),
+		})
+	}
+	return probs
+}
+
+// conditionalIntervalProb returns P(X in interval | X >= lowerBound) for
+// X ~ N(mean, sigma^2). A nil lo means -Inf; a nil hi means +Inf.
+func conditionalIntervalProb(lo, hi *float64, lowerBound, mean, sigma, survival float64) float64 {
+	effectiveLo := lowerBound
+	if lo != nil && *lo > effectiveLo {
+		effectiveLo = *lo
+	}
+	if hi != nil && effectiveLo >= *hi {
+		return 0
+	}
+
+	upperCDF := 1.0
+	if hi != nil {
+		upperCDF = normalCDF(*hi, mean, sigma)
+	}
+	lowerCDF := normalCDF(effectiveLo, mean, sigma)
+
+	prob := (upperCDF - lowerCDF) / survival
+	return clamp(prob, 0, 1)
+}
+
+// intervalProbability returns P(X in interval) for X ~ N(mean, sigma^2).
+// A nil lo means -Inf; a nil hi means +Inf.
+func intervalProbability(lo, hi *float64, mean, sigma float64) float64 {
+	upperCDF := 1.0
+	if hi != nil {
+		upperCDF = normalCDF(*hi, mean, sigma)
+	}
+	lowerCDF := 0.0
+	if lo != nil {
+		lowerCDF = normalCDF(*lo, mean, sigma)
+	}
+	return clamp(upperCDF-lowerCDF, 0, 1)
+}
+
+type temperatureBucket struct {
+	Label string
+	Lo    *float64
+	Hi    *float64
+}
+
+func temperatureBuckets() []temperatureBucket {
+	buckets := make([]temperatureBucket, 0, bucketCeilingC-bucketFloorC+1)
+	for tempC := bucketFloorC; tempC <= bucketCeilingC; tempC++ {
+		switch {
+		case tempC == bucketFloorC:
+			buckets = append(buckets, temperatureBucket{
+				Label: bucketLabel(tempC),
+				Lo:    nil,
+				Hi:    floatPtr(float64(tempC) + 0.5),
+			})
+		case tempC == bucketCeilingC:
+			buckets = append(buckets, temperatureBucket{
+				Label: bucketLabel(tempC),
+				Lo:    floatPtr(float64(tempC) - 0.5),
+				Hi:    nil,
+			})
+		default:
+			buckets = append(buckets, temperatureBucket{
+				Label: bucketLabel(tempC),
+				Lo:    floatPtr(float64(tempC) - 0.5),
+				Hi:    floatPtr(float64(tempC) + 0.5),
+			})
+		}
+	}
+	return buckets
+}
+
+func bucketLabel(tempC int) string {
+	switch tempC {
+	case bucketFloorC:
+		return fmt.Sprintf("%dC or below", bucketFloorC)
+	case bucketCeilingC:
+		return fmt.Sprintf("%dC or above", bucketCeilingC)
+	default:
+		return fmt.Sprintf("%dC", tempC)
 	}
 }
+
+func floatPtr(v float64) *float64 { return &v }
 
 // computeConfidence returns a score ∈ [0, 1] reflecting how much data backed
 // the estimate. Base is 0.50 (we always have at least a forecast); each

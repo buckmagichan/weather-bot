@@ -87,7 +87,7 @@ func assertValidDistribution(t *testing.T, d *domain.TemperatureBucketDistributi
 	}
 
 	// Bucket count
-	const wantBuckets = 4
+	wantBuckets := bucketCeilingC - bucketFloorC + 1
 	if len(d.BucketProbs) != wantBuckets {
 		t.Errorf("BucketProbs: got %d buckets, want %d", len(d.BucketProbs), wantBuckets)
 	}
@@ -122,6 +122,22 @@ func assertValidDistribution(t *testing.T, d *domain.TemperatureBucketDistributi
 // nearF reports whether |a-b| < tol.
 func nearF(a, b, tol float64) bool { return math.Abs(a-b) < tol }
 
+func sumProbUpTo(probs []domain.BucketProbability, maxTempC int) float64 {
+	var sum float64
+	for tempC := bucketFloorC; tempC <= maxTempC; tempC++ {
+		sum += findProb(probs, bucketLabel(tempC))
+	}
+	return sum
+}
+
+func sumProbFrom(probs []domain.BucketProbability, minTempC int) float64 {
+	var sum float64
+	for tempC := minTempC; tempC <= bucketCeilingC; tempC++ {
+		sum += findProb(probs, bucketLabel(tempC))
+	}
+	return sum
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -145,11 +161,19 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 				t.Helper()
 				assertValidDistribution(t, d)
 
-				wantLabels := []string{"17C or below", "18C", "19C", "20C or above"}
-				for i, want := range wantLabels {
+				wantFirstLabels := []string{
+					bucketLabel(bucketFloorC),
+					bucketLabel(bucketFloorC + 1),
+					bucketLabel(bucketFloorC + 2),
+					bucketLabel(bucketFloorC + 3),
+				}
+				for i, want := range wantFirstLabels {
 					if got := d.BucketProbs[i].Label; got != want {
 						t.Errorf("bucket[%d] label: got %q, want %q", i, got, want)
 					}
+				}
+				if got := d.BucketProbs[len(d.BucketProbs)-1].Label; got != bucketLabel(bucketCeilingC) {
+					t.Errorf("last bucket label: got %q, want %q", got, bucketLabel(bucketCeilingC))
 				}
 				// Confidence: base only (0.50) since no optional fields are set.
 				if !nearF(d.Confidence, 0.50, 1e-9) {
@@ -179,21 +203,19 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 					t.Errorf("positive trend should raise ExpectedHighC: got %.3f, baseline %.3f",
 						d.ExpectedHighC, baseline.ExpectedHighC)
 				}
-				// Warmer buckets (19C, 20C+) should gain probability.
-				for _, label := range []string{"19C", "20C or above"} {
-					got := findProb(d.BucketProbs, label)
-					base := findProb(baseline.BucketProbs, label)
-					if got <= base {
-						t.Errorf("positive trend: %q prob should increase: got %.4f, baseline %.4f",
-							label, got, base)
-					}
+				// Warmer-tail probability should increase.
+				gotWarm := sumProbFrom(d.BucketProbs, 19)
+				baseWarm := sumProbFrom(baseline.BucketProbs, 19)
+				if gotWarm <= baseWarm {
+					t.Errorf("positive trend: warm-tail prob should increase: got %.4f, baseline %.4f",
+						gotWarm, baseWarm)
 				}
-				// Cooler bucket (17C or below) should lose probability.
-				got := findProb(d.BucketProbs, "17C or below")
-				base := findProb(baseline.BucketProbs, "17C or below")
-				if got >= base {
-					t.Errorf("positive trend: \"17C or below\" prob should decrease: got %.4f, baseline %.4f",
-						got, base)
+				// Cooler-tail probability should decrease.
+				gotCool := sumProbUpTo(d.BucketProbs, 17)
+				baseCool := sumProbUpTo(baseline.BucketProbs, 17)
+				if gotCool >= baseCool {
+					t.Errorf("positive trend: cool-tail prob should decrease: got %.4f, baseline %.4f",
+						gotCool, baseCool)
 				}
 			},
 		},
@@ -214,21 +236,19 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 					t.Errorf("negative trend should lower ExpectedHighC: got %.3f, baseline %.3f",
 						d.ExpectedHighC, baseline.ExpectedHighC)
 				}
-				// Cooler bucket (17C or below) should gain probability.
-				got := findProb(d.BucketProbs, "17C or below")
-				base := findProb(baseline.BucketProbs, "17C or below")
-				if got <= base {
-					t.Errorf("negative trend: \"17C or below\" prob should increase: got %.4f, baseline %.4f",
-						got, base)
+				// Cooler-tail probability should gain.
+				gotCool := sumProbUpTo(d.BucketProbs, 17)
+				baseCool := sumProbUpTo(baseline.BucketProbs, 17)
+				if gotCool <= baseCool {
+					t.Errorf("negative trend: cool-tail prob should increase: got %.4f, baseline %.4f",
+						gotCool, baseCool)
 				}
-				// Warmer buckets should lose probability.
-				for _, label := range []string{"19C", "20C or above"} {
-					got := findProb(d.BucketProbs, label)
-					base := findProb(baseline.BucketProbs, label)
-					if got >= base {
-						t.Errorf("negative trend: %q prob should decrease: got %.4f, baseline %.4f",
-							label, got, base)
-					}
+				// Warmer-tail probability should lose.
+				gotWarm := sumProbFrom(d.BucketProbs, 19)
+				baseWarm := sumProbFrom(baseline.BucketProbs, 19)
+				if gotWarm >= baseWarm {
+					t.Errorf("negative trend: warm-tail prob should decrease: got %.4f, baseline %.4f",
+						gotWarm, baseWarm)
 				}
 			},
 		},
@@ -250,15 +270,20 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 				baseline := svc.Build(makeSummary(withForecastHigh(18.0)))
 
 				// Adjusted high should not change (gap = -0.2 is within the dead zone).
-				if !nearF(d.ExpectedHighC, baseline.ExpectedHighC, 1e-6) {
-					t.Errorf("obs close to forecast should not change ExpectedHighC: got %.4f, baseline %.4f",
-						d.ExpectedHighC, baseline.ExpectedHighC)
+				// But the final daily high still cannot be below the observed high.
+				if d.ExpectedHighC < 17.8 {
+					t.Errorf("obs close to forecast should enforce observed high floor: got %.4f, want >= 17.8",
+						d.ExpectedHighC)
 				}
-				// Narrower spread → lower-tail probability decreases (downside risk reduced).
-				gotLow := findProb(d.BucketProbs, "17C or below")
-				baseLow := findProb(baseline.BucketProbs, "17C or below")
-				if gotLow >= baseLow {
-					t.Errorf("obs close to forecast: \"17C or below\" should decrease (narrower spread): got %.4f, baseline %.4f",
+				// Once 17.8 C has already happened, all buckets up to 17C are impossible.
+				gotLow := sumProbUpTo(d.BucketProbs, 17)
+				if !nearF(gotLow, 0, 1e-9) {
+					t.Errorf("obs close to forecast: buckets up to 17C should be impossible after 17.8C observed, got %.4f",
+						gotLow)
+				}
+				baseLow := sumProbUpTo(baseline.BucketProbs, 17)
+				if baseLow <= gotLow {
+					t.Errorf("baseline lower-tail probability should still exceed conditioned value: got %.4f, baseline %.4f",
 						gotLow, baseLow)
 				}
 			},
@@ -285,14 +310,12 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 					t.Errorf("3h warming should raise ExpectedHighC: got %.4f, baseline %.4f",
 						d.ExpectedHighC, baseline.ExpectedHighC)
 				}
-				// Same spread, higher center → upper buckets gain probability.
-				for _, label := range []string{"19C", "20C or above"} {
-					got := findProb(d.BucketProbs, label)
-					base := findProb(baseline.BucketProbs, label)
-					if got <= base {
-						t.Errorf("3h warming: %q prob should increase: got %.4f, baseline %.4f",
-							label, got, base)
-					}
+				// Same spread, higher center → warm-tail probability gains.
+				gotWarm := sumProbFrom(d.BucketProbs, 19)
+				baseWarm := sumProbFrom(baseline.BucketProbs, 19)
+				if gotWarm <= baseWarm {
+					t.Errorf("3h warming: warm-tail prob should increase: got %.4f, baseline %.4f",
+						gotWarm, baseWarm)
 				}
 			},
 		},
@@ -358,10 +381,10 @@ func TestBuildBucketDistribution_Invariants(t *testing.T) {
 func TestBuildBucketDistribution_Confidence(t *testing.T) {
 	svc := NewBuildBucketDistributionService()
 
-	c0 := svc.Build(makeSummary()).Confidence                                                                                                       // 0.50
-	c1 := svc.Build(makeSummary(withPreviousForecastHigh(17.5))).Confidence                                                                        // 0.65
-	c2 := svc.Build(makeSummary(withPreviousForecastHigh(17.5), withObsPoints(4))).Confidence                                                      // 0.80
-	c3 := svc.Build(makeSummary(withPreviousForecastHigh(17.5), withObsPoints(4), withTempChange3h(0.5))).Confidence                               // 0.90
+	c0 := svc.Build(makeSummary()).Confidence                                                                        // 0.50
+	c1 := svc.Build(makeSummary(withPreviousForecastHigh(17.5))).Confidence                                          // 0.65
+	c2 := svc.Build(makeSummary(withPreviousForecastHigh(17.5), withObsPoints(4))).Confidence                        // 0.80
+	c3 := svc.Build(makeSummary(withPreviousForecastHigh(17.5), withObsPoints(4), withTempChange3h(0.5))).Confidence // 0.90
 
 	steps := []struct{ got, prev float64 }{
 		{c1, c0},
@@ -396,6 +419,33 @@ func TestBuildBucketDistribution_TrendCap(t *testing.T) {
 	}
 }
 
+func TestBuildBucketDistribution_ObservedHighSetsHardFloor(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+
+	d := svc.Build(makeSummary(
+		withForecastHigh(18.3),
+		withObsHigh(23.0),
+		withTempChange3h(-4.4),
+	))
+
+	assertValidDistribution(t, d)
+
+	if !nearF(d.ExpectedHighC, 23.0, 1e-9) {
+		t.Errorf("ExpectedHighC: got %.4f, want 23.0", d.ExpectedHighC)
+	}
+	if !nearF(sumProbUpTo(d.BucketProbs, 22), 0, 1e-9) {
+		t.Errorf("all buckets up to 22C should be impossible once 23.0C is observed, got %.6f",
+			sumProbUpTo(d.BucketProbs, 22))
+	}
+	if !nearF(sumProbFrom(d.BucketProbs, 23), 1.0, 1e-9) {
+		t.Errorf("all probability mass should remain on 23C and above, got %.6f",
+			sumProbFrom(d.BucketProbs, 23))
+	}
+	if got := findProb(d.BucketProbs, "23C"); got <= 0 {
+		t.Errorf("\"23C\" bucket should retain some probability once 23.0C is observed, got %.6f", got)
+	}
+}
+
 // TestBuildBucketDistribution_MetadataPropagation verifies that station code,
 // target date, and generated-at are correctly propagated to the output.
 func TestBuildBucketDistribution_MetadataPropagation(t *testing.T) {
@@ -418,10 +468,10 @@ func TestBuildBucketDistribution_MetadataPropagation(t *testing.T) {
 // values and the exact midpoint symmetry.
 func TestNormalCDF(t *testing.T) {
 	tests := []struct {
-		desc        string
+		desc       string
 		x, mean, σ float64
-		want        float64
-		tol         float64
+		want       float64
+		tol        float64
 	}{
 		{"midpoint symmetry", 0, 0, 1, 0.5, 1e-15},
 		{"+1σ", 1, 0, 1, 0.8413447, 1e-6},
@@ -464,7 +514,7 @@ func TestFindProb(t *testing.T) {
 		{Label: "17C or below", Prob: 0.10},
 		{Label: "18C", Prob: 0.40},
 		{Label: "19C", Prob: 0.35},
-		{Label: "20C or above", Prob: 0.15},
+		{Label: "25C or above", Prob: 0.15},
 	}
 
 	if got := findProb(probs, "18C"); !nearF(got, 0.40, 1e-9) {

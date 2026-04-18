@@ -95,8 +95,8 @@ func (s *BuildFeatureSummaryService) Build(
 	// --- Observations for the day ---
 	// ListForDate returns all stored rows for the target local date. We then
 	// restrict to "observed so far": rows whose observed_at is at or before now.
-	// This prevents Meteostat data for future hours of the same calendar day
-	// from contaminating derived fields like ObservedHighSoFarC.
+	// This prevents any future-dated rows of the same calendar day from
+	// contaminating derived fields like ObservedHighSoFarC.
 	obs, err := s.obsRepo.ListForDate(ctx, stationCode, targetDate, s.loc)
 	if err != nil {
 		return nil, fmt.Errorf("build feature summary: list observations: %w", err)

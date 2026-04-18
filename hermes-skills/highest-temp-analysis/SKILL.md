@@ -1,7 +1,7 @@
 ---
 name: highest-temp-analysis
 description: Explain a structured daily highest-temperature bucket forecast for ZSPD and return JSON analysis.
-version: 1.1.0
+version: 1.3.0
 author: wanghan
 license: MIT
 ---
@@ -27,6 +27,15 @@ Your job is to:
 - surface risk flags
 - suggest when to check again
 
+The observation data in the payload may come from METAR reports rather than
+hourly model/interpolated data. That means:
+- `observation_points` may be greater than 24 for the same local date
+- `latest_observation_at` may land on `:00` or `:30`
+- `bucket_probs` may contain many one-degree buckets rather than only a few
+  coarse ranges
+- once `observed_high_so_far_c` already guarantees a bucket floor, you should
+  treat lower buckets as effectively ruled out
+
 You may reason internally. Your final output is a strict JSON object consumed directly by a Go JSON parser. No cleanup, no repair, no post-processing will be applied. The output must be machine-parseable as-is.
 
 ## Expected input
@@ -45,18 +54,18 @@ The input will be a structured JSON payload with this shape:
     "latest_observed_temp_c": 14.4,
     "observed_high_so_far_c": 18.0,
     "temp_change_last_3h_c": -0.6,
-    "latest_observation_at": "2026-04-16T22:00:00+08:00",
-    "observation_points": 23,
+    "latest_observation_at": "2026-04-16T21:30:00+08:00",
+    "observation_points": 31,
     "hourly_points": 24
   },
   "bucket_distribution": {
     "expected_high_c": 18.09,
     "confidence": 0.9,
     "bucket_probs": [
-      { "label": "17C or below", "prob": 0.2177 },
+      { "label": "17C", "prob": 0.2177 },
       { "label": "18C", "prob": 0.4923 },
       { "label": "19C", "prob": 0.2604 },
-      { "label": "20C or above", "prob": 0.0296 }
+      { "label": "20C", "prob": 0.0296 }
     ]
   },
   "sanity_flags": [
@@ -92,6 +101,40 @@ Your entire response MUST be exactly this JSON object and nothing else:
 | `key_reasons` | array of strings | Required. 2 to 4 short plain-text strings. Each item is a sentence fragment, not an object. |
 | `risk_flags` | array of strings | Required. May be empty (`[]`). Each item is a plain string. Never an array of objects. |
 | `next_check_in_minutes` | integer | Required. Prefer `30`, `60`, or `90`. Use a shorter interval when data is sparse or sanity flags are present. |
+
+### Reasoning guidance
+
+- If one bucket has probability `1.0`, prefer `secondary_risk_bucket: null`
+  unless another bucket still represents a genuine operational risk.
+- If `observed_high_so_far_c` already exceeds a bucket threshold, do not frame
+  lower buckets as live downside outcomes.
+- Late-day coverage with many observations and a cooling trend usually supports
+  a longer recheck interval than sparse early-day data.
+- When `bucket_probs` contains many one-degree buckets, focus your explanation
+  on the top 2 to 3 most likely buckets rather than enumerating the whole list.
+- Prefer a `secondary_risk_bucket` only when it represents a meaningful nearby
+  alternative outcome. If the runner-up probability is negligible, use `null`.
+- When the top two buckets are close, treat the adjacent runner-up as the main
+  risk to mention. Avoid choosing a distant or much lower-probability bucket.
+- If `observed_high_so_far_c` is already equal to the top bucket floor, frame
+  remaining uncertainty as whether the day finishes in that bucket or a higher
+  neighbouring bucket.
+- Use `30` minutes when the outcome is still actively moving or the top buckets
+  are tightly clustered; prefer `60` or `90` when late-day coverage is strong
+  and cooling suggests the daily high is already in.
+
+### Practical heuristics
+
+- For `key_reasons`, prioritize:
+  1. the highest-probability bucket and its approximate probability
+  2. whether `observed_high_so_far_c` already rules out lower outcomes
+  3. recent trend context such as cooling or warming
+  4. data coverage quality when it materially affects confidence
+- Do not waste a `key_reasons` slot on buckets whose probability is effectively
+  zero unless a sanity flag makes them operationally relevant.
+- If `observed_high_so_far_c` already matches the current best bucket, the most
+  useful secondary risk is usually the next warmer adjacent bucket, not a lower
+  bucket that has already been ruled out.
 
 ### Permitted keys
 
@@ -132,7 +175,7 @@ Formatted for readability (same data, both are valid):
   "key_reasons": [
     "Highest bucket probability is 18C at 49%",
     "Observed high already at 18.0C exceeds latest forecast of 17.8C",
-    "Upward forecast trend of +0.9C supports 18C or above"
+    "Upward forecast trend of +0.9C supports 18C to 19C"
   ],
   "risk_flags": [
     "observed_high_exceeds_latest_forecast"

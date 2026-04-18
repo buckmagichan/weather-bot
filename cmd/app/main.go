@@ -13,7 +13,7 @@ import (
 
 	"github.com/buckmagichan/weather-bot/internal/domain"
 	"github.com/buckmagichan/weather-bot/internal/hermes"
-	"github.com/buckmagichan/weather-bot/internal/providers/meteostat"
+	"github.com/buckmagichan/weather-bot/internal/providers/aviationweather"
 	"github.com/buckmagichan/weather-bot/internal/providers/openmeteo"
 	"github.com/buckmagichan/weather-bot/internal/repository"
 	"github.com/buckmagichan/weather-bot/internal/services"
@@ -74,20 +74,19 @@ func main() {
 	}
 
 	// --- Observations ---
-	meteoAPIKey := os.Getenv("METEOSTAT_API_KEY")
-	if meteoAPIKey == "" {
-		log.Println("METEOSTAT_API_KEY not set — skipping observation ingestion")
-		return
-	}
-	meteoClient := meteostat.NewClient(meteoAPIKey)
-	obsSvc, err := services.NewFetchObservationService(meteoClient)
+	obsClient := aviationweather.NewClient()
+	obsSvc, err := services.NewFetchObservationService(obsClient)
 	if err != nil {
 		log.Fatalf("init observation service: %v", err)
 	}
-	observations, err := obsSvc.FetchTodayObservations(ctx)
+	// Observation fetch gets its own budget because upstream METAR latency can
+	// be bursty and should not consume the forecast/DB time budget.
+	obsCtx, obsCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer obsCancel()
+	observations, err := obsSvc.FetchTodayObservations(obsCtx)
 	if err != nil {
-		log.Printf("fetch observations: %v — skipping", err)
-		return
+		log.Printf("fetch observations: %v — continuing without new observations", err)
+		observations = nil
 	}
 	obsRepo := repository.NewObservationSnapshotRepo(pool)
 	newObs := 0

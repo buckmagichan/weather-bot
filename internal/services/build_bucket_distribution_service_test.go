@@ -278,7 +278,7 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 				// Once 17.8 C has already happened, all buckets up to 17C are impossible.
 				gotLow := sumProbUpTo(d.BucketProbs, 17)
 				if !nearF(gotLow, 0, 1e-9) {
-					t.Errorf("obs close to forecast: buckets up to 17C should be impossible after 17.8C observed, got %.4f",
+					t.Errorf("obs close to forecast: buckets from 14C through 17C should be impossible after 17.8C observed, got %.4f",
 						gotLow)
 				}
 				baseLow := sumProbUpTo(baseline.BucketProbs, 17)
@@ -511,7 +511,7 @@ func TestBuildBucketDistribution_NilSummaryPanics(t *testing.T) {
 // TestFindProb verifies the findProb helper returns -1 for missing labels.
 func TestFindProb(t *testing.T) {
 	probs := []domain.BucketProbability{
-		{Label: "17C or below", Prob: 0.10},
+		{Label: "14C or below", Prob: 0.10},
 		{Label: "18C", Prob: 0.40},
 		{Label: "19C", Prob: 0.35},
 		{Label: "25C or above", Prob: 0.15},

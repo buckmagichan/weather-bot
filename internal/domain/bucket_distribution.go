@@ -4,7 +4,7 @@ import "time"
 
 // BucketProbability is one labelled bucket in a temperature distribution.
 type BucketProbability struct {
-	Label string  `json:"label"` // human-readable label, e.g. "17C or below", "18C", "20C or above"
+	Label string  `json:"label"` // human-readable label, e.g. "14C or below", "18C", "25C or above"
 	Prob  float64 `json:"prob"`  // probability ∈ [0, 1]
 }
 

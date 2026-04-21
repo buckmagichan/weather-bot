@@ -14,7 +14,7 @@ import (
 type BuildBucketDistributionService struct{}
 
 const (
-	bucketFloorC   = 17
+	bucketFloorC   = 14
 	bucketCeilingC = 25
 )
 
@@ -120,8 +120,8 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 // Bucket boundaries use half-integer midpoints between neighbouring integer
 // labels. With the current fixed range:
 //
-//	"17C or below" →  X ≤ 17.5
-//	"18C"          →  17.5 < X ≤ 18.5
+//	"14C or below" →  X ≤ 14.5
+//	"15C"          →  14.5 < X ≤ 15.5
 //	...
 //	"24C"          →  23.5 < X ≤ 24.5
 //	"25C or above" →  X > 24.5

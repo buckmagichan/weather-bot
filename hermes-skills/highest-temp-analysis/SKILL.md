@@ -1,7 +1,7 @@
 ---
 name: highest-temp-analysis
 description: Explain a structured daily highest-temperature bucket forecast for ZSPD and return JSON analysis.
-version: 1.3.0
+version: 1.3.1
 author: wanghan
 license: MIT
 ---
@@ -62,9 +62,10 @@ The input will be a structured JSON payload with this shape:
     "expected_high_c": 18.09,
     "confidence": 0.9,
     "bucket_probs": [
+      { "label": "14C or below", "prob": 0.0020 },
       { "label": "17C", "prob": 0.2177 },
       { "label": "18C", "prob": 0.4923 },
-      { "label": "19C", "prob": 0.2604 },
+      { "label": "19C", "prob": 0.2584 },
       { "label": "20C", "prob": 0.0296 }
     ]
   },
@@ -123,6 +124,28 @@ Your entire response MUST be exactly this JSON object and nothing else:
   are tightly clustered; prefer `60` or `90` when late-day coverage is strong
   and cooling suggests the daily high is already in.
 
+### Conflict handling and self-correction
+
+- Treat `observed_high_so_far_c` as a hard lower bound on the finished daily
+  high. If it already rules out a lower bucket, do not select or describe that
+  lower bucket as a live outcome.
+- When signals disagree, resolve them in this order:
+  1. hard floor from `observed_high_so_far_c`
+  2. explicit `bucket_probs` labels and probabilities
+  3. input `sanity_flags`
+  4. softer context such as forecast trend, recent momentum, and data coverage
+- Compare buckets by probability value, not by array order. If the array is not
+  sorted, still choose the highest-probability valid bucket.
+- If probabilities do not sum to exactly `1.0`, treat that as normal rounding
+  unless the payload clearly indicates a more serious contradiction.
+- If optional fields are missing or `null`, continue with the remaining
+  evidence. Do not invent missing values to make the explanation sound fuller.
+- If `observed_high_so_far_c` conflicts with lower-probability buckets, prefer
+  the bucket floor implied by observation reality over stale downside buckets.
+- Treat `sanity_flags` as operational warnings, not automatic overrides. A flag
+  should influence confidence, reasons, and check timing, but it should not
+  force a bucket choice that contradicts stronger evidence.
+
 ### Practical heuristics
 
 - For `key_reasons`, prioritize:
@@ -135,6 +158,17 @@ Your entire response MUST be exactly this JSON object and nothing else:
 - If `observed_high_so_far_c` already matches the current best bucket, the most
   useful secondary risk is usually the next warmer adjacent bucket, not a lower
   bucket that has already been ruled out.
+- If `sanity_flags` is present, prefer reusing those exact labels in
+  `risk_flags`. Do not invent novel flag names unless the input already
+  provides them.
+- Keep `key_reasons` grounded in the payload. Prefer "top bucket at 49%" over
+  generic claims like "conditions look favorable."
+- Adjust `confidence` conservatively:
+  1. reduce it when the top two buckets are close, sanity flags are present, or
+     observation coverage is sparse
+  2. keep it near the input value when signals are broadly aligned
+  3. only increase it modestly when a strong observed floor and a clearly
+     leading bucket point to the same outcome
 
 ### Permitted keys
 
@@ -237,7 +271,34 @@ Let me know if you need more detail.
 **Extra forbidden key** — invalid:
 
 ```
-{ "predicted_best_bucket": "18C", "downside_risk": "17C", ... }
+{ "predicted_best_bucket": "18C", "downside_risk": "14C or below", ... }
+```
+
+**Semantically invalid bucket below observed floor** — invalid:
+
+If `observed_high_so_far_c` is already `18.4`, this is wrong because `18C`
+cannot remain the final bucket:
+
+```
+{"predicted_best_bucket":"18C","secondary_risk_bucket":"17C","confidence":0.88,"key_reasons":["18C still leads"],"risk_flags":[],"next_check_in_minutes":60}
+```
+
+**Semantically invalid probability ranking** — invalid:
+
+If `"19C"` has a higher probability than `"18C"`, this is wrong because it
+blindly follows array order instead of the numeric values:
+
+```
+{"predicted_best_bucket":"18C","secondary_risk_bucket":"19C","confidence":0.8,"key_reasons":["18C appears first"],"risk_flags":[],"next_check_in_minutes":60}
+```
+
+**Invented risk flag** — invalid:
+
+If the input `sanity_flags` only contains `observed_high_exceeds_latest_forecast`,
+do not invent a new label like this:
+
+```
+{"predicted_best_bucket":"19C","secondary_risk_bucket":"20C","confidence":0.72,"key_reasons":["Observed floor is strong","19C has the highest probability"],"risk_flags":["late_day_reversal_risk"],"next_check_in_minutes":30}
 ```
 
 ## Format rules (summary)

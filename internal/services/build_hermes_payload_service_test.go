@@ -39,7 +39,7 @@ func testDist(stationCode, targetDate string) *domain.TemperatureBucketDistribut
 		ExpectedHighC:   17.2,
 		Confidence:      0.75,
 		BucketProbs: []domain.BucketProbability{
-			{Label: "17C or below", Prob: 0.30},
+			{Label: "14C or below", Prob: 0.30},
 			{Label: "18C", Prob: 0.40},
 			{Label: "19C or above", Prob: 0.30},
 		},

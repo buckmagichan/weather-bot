@@ -143,7 +143,7 @@ func TestParseOutput_pure_json(t *testing.T) {
 }
 
 func TestParseOutput_null_secondary_risk(t *testing.T) {
-	raw := `{"predicted_best_bucket":"17C or below","secondary_risk_bucket":null,"confidence":0.6,"key_reasons":["sparse data"],"risk_flags":[],"next_check_in_minutes":30}`
+	raw := `{"predicted_best_bucket":"14C or below","secondary_risk_bucket":null,"confidence":0.6,"key_reasons":["sparse data"],"risk_flags":[],"next_check_in_minutes":30}`
 	result, err := parseOutput([]byte(raw))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

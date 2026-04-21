@@ -143,7 +143,7 @@ func TestParseOutput_pure_json(t *testing.T) {
 }
 
 func TestParseOutput_null_secondary_risk(t *testing.T) {
-	raw := `{"predicted_best_bucket":"14C or below","secondary_risk_bucket":null,"confidence":0.6,"key_reasons":["sparse data"],"risk_flags":[],"next_check_in_minutes":30}`
+	raw := `{"predicted_best_bucket":"14C or below","secondary_risk_bucket":null,"confidence":0.6,"key_reasons":["sparse data","limited coverage"],"risk_flags":[],"next_check_in_minutes":30}`
 	result, err := parseOutput([]byte(raw))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -190,6 +190,39 @@ func TestParseOutput_malformed_json_returns_error(t *testing.T) {
 	}
 }
 
+func TestParseOutput_ignores_trailing_unrelated_json(t *testing.T) {
+	raw := []byte(validResult + "\n" + `{"debug":"trailing metadata"}`)
+	result, err := parseOutput(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.PredictedBestBucket != "18C" {
+		t.Errorf("PredictedBestBucket: got %q, want 18C", result.PredictedBestBucket)
+	}
+}
+
+func TestParseOutput_rejects_empty_analysis_fields(t *testing.T) {
+	raw := []byte(`{"predicted_best_bucket":"","secondary_risk_bucket":null,"confidence":0.75,"key_reasons":[],"risk_flags":[],"next_check_in_minutes":0}`)
+	_, err := parseOutput(raw)
+	if err == nil {
+		t.Fatal("expected error for empty analysis fields, got nil")
+	}
+	if !strings.Contains(err.Error(), "predicted_best_bucket") && !strings.Contains(err.Error(), "key_reasons") {
+		t.Errorf("error should mention invalid analysis fields, got: %v", err)
+	}
+}
+
+func TestParseOutput_rejects_incomplete_analysis_object(t *testing.T) {
+	raw := []byte(`{"predicted_best_bucket":"18C","confidence":0.8}`)
+	_, err := parseOutput(raw)
+	if err == nil {
+		t.Fatal("expected error for incomplete analysis object, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly") && !strings.Contains(err.Error(), "missing required key") {
+		t.Errorf("error should mention missing analysis keys, got: %v", err)
+	}
+}
+
 // ---- buildPrompt ------------------------------------------------------------
 
 func TestBuildPrompt_contains_skill_and_payload(t *testing.T) {
@@ -201,5 +234,25 @@ func TestBuildPrompt_contains_skill_and_payload(t *testing.T) {
 	}
 	if !strings.Contains(prompt, string(payload)) {
 		t.Error("prompt should embed the full payload JSON inline")
+	}
+}
+
+func TestParseOutput_accepts_normalized_key_variants(t *testing.T) {
+	raw := []byte(`{"predictedbestbucket":"16C","secondaryriskbucket":"17C","confidence":0.78,"keyreasons":["16C leads at 49.5% but 17C is close at 46%","Observed high so far is 16C with cooling trend of -1C in last 3h","47 observation points through 23:00 local time provide strong late-day coverage"],"riskflags":["observedhighexceedslatestforecast"],"nextcheckin_minutes":60}`)
+	result, err := parseOutput(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.PredictedBestBucket != "16C" {
+		t.Errorf("PredictedBestBucket: got %q, want 16C", result.PredictedBestBucket)
+	}
+	if result.SecondaryRiskBucket == nil || *result.SecondaryRiskBucket != "17C" {
+		t.Errorf("SecondaryRiskBucket: got %v, want 17C", result.SecondaryRiskBucket)
+	}
+	if len(result.RiskFlags) != 1 || result.RiskFlags[0] != "observed_high_exceeds_latest_forecast" {
+		t.Errorf("RiskFlags: got %v, want normalized flag", result.RiskFlags)
+	}
+	if result.NextCheckInMinutes != 60 {
+		t.Errorf("NextCheckInMinutes: got %d, want 60", result.NextCheckInMinutes)
 	}
 }

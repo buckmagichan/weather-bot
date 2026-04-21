@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -64,13 +65,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("insert forecast: %v", err)
 	}
-	fmt.Printf("Station:       %s\n", snap.StationCode)
-	fmt.Printf("Target date:   %s\n", snap.TargetDateLocal)
-	fmt.Printf("Forecast high: %.1f C\n", snap.ForecastHighC)
 	if forecastInserted {
-		fmt.Println("Forecast:      saved to postgres")
-	} else {
-		fmt.Println("Forecast:      already in postgres (duplicate)")
+		log.Printf("forecast saved (%s  %.1f C)", snap.TargetDateLocal, snap.ForecastHighC)
 	}
 
 	// --- Observations ---
@@ -89,17 +85,11 @@ func main() {
 		observations = nil
 	}
 	obsRepo := repository.NewObservationSnapshotRepo(pool)
-	newObs := 0
 	for i := range observations {
-		inserted, err := obsRepo.Insert(ctx, &observations[i])
-		if err != nil {
+		if _, err := obsRepo.Insert(ctx, &observations[i]); err != nil {
 			log.Fatalf("insert observation: %v", err)
 		}
-		if inserted {
-			newObs++
-		}
 	}
-	fmt.Printf("Observations:  %d new / %d fetched\n", newObs, len(observations))
 
 	// --- Feature Summary ---
 	summarySvc, err := services.NewBuildFeatureSummaryService(forecastRepo, obsRepo)
@@ -110,31 +100,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("build feature summary: %v", err)
 	}
-	fmt.Println("\n--- Feature Summary ---")
-	fmt.Printf("Station:               %s\n", summary.StationCode)
-	fmt.Printf("Target date:           %s\n", summary.TargetDateLocal)
-	fmt.Printf("Generated at:          %s\n", summary.GeneratedAt.Format(time.RFC3339))
-	fmt.Printf("Latest forecast high:  %.1f C\n", summary.LatestForecastHighC)
-	fmt.Printf("Previous forecast high:%s\n", optFloat(summary.PreviousForecastHighC, " %.1f C"))
-	fmt.Printf("Forecast trend:        %s\n", optFloat(summary.ForecastTrendC, "%+.1f C"))
-	fmt.Printf("Latest observed temp:  %s\n", optFloat(summary.LatestObservedTempC, "%.1f C"))
-	fmt.Printf("Observed high so far:  %s\n", optFloat(summary.ObservedHighSoFarC, "%.1f C"))
-	fmt.Printf("Temp change last 3h:   %s\n", optFloat(summary.TempChangeLast3hC, "%+.1f C"))
-	fmt.Printf("Forecast snapshot at:  %s\n", summary.ForecastSnapshotFetchedAt.Format(time.RFC3339))
-	fmt.Printf("Latest observation at: %s\n", optTime(summary.LatestObservationAt))
-	fmt.Printf("Hourly points:         %d\n", summary.HourlyPoints)
-	fmt.Printf("Observation points:    %d\n", summary.ObservationPoints)
 
 	// --- Bucket Distribution ---
 	bucketSvc := services.NewBuildBucketDistributionService()
 	dist := bucketSvc.Build(summary)
-	fmt.Println("\n--- Bucket Distribution ---")
-	fmt.Printf("Expected high:  %.1f C\n", dist.ExpectedHighC)
-	fmt.Printf("Confidence:     %.2f\n", dist.Confidence)
-	fmt.Println("Buckets:")
-	for _, b := range dist.BucketProbs {
-		fmt.Printf("  %-18s %.2f\n", b.Label+":", b.Prob)
-	}
 
 	// --- Hermes Payload ---
 	hermesSvc := services.NewBuildHermesPayloadService()
@@ -142,12 +111,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("build hermes payload: %v", err)
 	}
-	fmt.Println("\n--- Hermes Payload ---")
-	fmt.Println(hermes.MustPrettyJSON(payload))
 
 	// --- Hermes Analysis ---
 	// Use a dedicated context: LLM inference takes longer than the 15 s DB budget.
-	hermesCtx, hermesCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	hermesCtx, hermesCancel := context.WithTimeout(context.Background(), buildHermesTimeout())
 	defer hermesCancel()
 
 	bridge := hermes.NewBridge()
@@ -209,30 +176,22 @@ func main() {
 	}
 }
 
-// optFloat formats a *float64 using the given fmt verb, or returns "—" if nil.
-func optFloat(p *float64, verb string) string {
-	if p == nil {
-		return "—"
+func buildHermesTimeout() time.Duration {
+	const defaultHermesTimeout = 3 * time.Minute
+
+	seconds := os.Getenv("HERMES_TIMEOUT_SECONDS")
+	if seconds == "" {
+		return defaultHermesTimeout
 	}
-	return fmt.Sprintf(verb, *p)
+
+	n, err := strconv.Atoi(seconds)
+	if err != nil || n <= 0 {
+		log.Printf("invalid HERMES_TIMEOUT_SECONDS=%q; using default %s", seconds, defaultHermesTimeout)
+		return defaultHermesTimeout
+	}
+	return time.Duration(n) * time.Second
 }
 
-// optTime formats a *time.Time as RFC3339, or returns "—" if nil.
-func optTime(p *time.Time) string {
-	if p == nil {
-		return "—"
-	}
-	return p.Format(time.RFC3339)
-}
-
-// buildDSN returns a PostgreSQL connection string. Prefers DATABASE_URL; falls
-// back to constructing a URL from the individual POSTGRES_* vars that Docker
-// Compose also uses.
-//
-// TLS behaviour is controlled by POSTGRES_SSL_MODE (any libpq sslmode value).
-// Defaults to "disable" for local Docker. For production, set
-// POSTGRES_SSL_MODE=require (or prefer/verify-ca/verify-full) or supply
-// DATABASE_URL with the desired sslmode already embedded.
 func buildDSN() string {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		return dsn

@@ -20,9 +20,8 @@ docker compose --env-file .env -f infra/docker-compose.postgres.yml logs -f post
 
 ```bash
 # Migrations (run after starting postgres)
-docker exec -i weather-bot-postgres psql -U weatherbot -d weatherbot < migrations/001_forecast_snapshots.up.sql
-docker exec -i weather-bot-postgres psql -U weatherbot -d weatherbot < migrations/002_observation_snapshots.up.sql
-docker exec -i weather-bot-postgres psql -U weatherbot -d weatherbot < migrations/003_analysis_results.up.sql
+./scripts/migrate.sh      # apply all *.up.sql migrations in order
+./scripts/migrate.sh down # apply all *.down.sql migrations in reverse order
 ```
 
 `.env` is loaded automatically at startup via `godotenv.Load()`. No `source .env` needed. Required vars: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`. Optional: `POSTGRES_SSL_MODE` (libpq sslmode value; defaults to `disable` for local Docker — set to `require` or higher for any remote DB) and `HERMES_TIMEOUT_SECONDS`.
@@ -88,7 +87,7 @@ Loads `.env` via `godotenv`. Builds DSN from `DATABASE_URL` (preferred) or `POST
 - `001_forecast_snapshots.up.sql` — `forecast_snapshots` table: unique index on `(station_code, target_date_local, content_hash)`.
 - `002_observation_snapshots.up.sql` — `observation_snapshots` table: `observed_at TIMESTAMPTZ NOT NULL`; unique index on `(station_code, observed_at)`.
 - `003_analysis_results.up.sql` — `analysis_results` table: all scalar analysis fields + four JSONB columns (`key_reasons_json`, `risk_flags_json`, `feature_summary_json`, `bucket_distribution_json`, `hermes_payload_json`); unique index on `(station_code, target_date_local, analysis_content_hash)`; plain indexes on `(station_code, target_date_local)` and `(generated_at DESC)`. Down migration drops the table.
-- Applied manually via `docker exec psql`. No migration runner yet.
+- Applied via `./scripts/migrate.sh`, which shells into the local Postgres Docker container and runs SQL files in filename order.
 
 ### `infra/`
 PostgreSQL via `docker-compose.postgres.yml`. Credentials in `.env`. Volume at `/var/lib/postgresql/data`.

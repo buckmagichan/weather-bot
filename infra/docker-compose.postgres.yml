@@ -10,7 +10,8 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # Postgres 18+ stores data under /var/lib/postgresql/<major>/docker.
+      - postgres_data:/var/lib/postgresql
     shm_size: 256mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]

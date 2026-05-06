@@ -5,8 +5,10 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/buckmagichan/weather-bot/internal/domain"
+	"github.com/buckmagichan/weather-bot/internal/providers/wunderground"
 )
 
 // =============================================================================
@@ -31,11 +33,32 @@ func withObsHigh(c float64) summaryOption {
 		s.ObservationPoints = 4 // implies obs data is present for spread calculation
 	}
 }
+func withResolutionHigh(c float64) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.ResolutionObservedHighC = fp(c) }
+}
+func withResolutionSourceType(sourceType string) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.ResolutionSourceType = sourceType }
+}
 func withTempChange3h(c float64) summaryOption {
 	return func(s *domain.WeatherFeatureSummary) { s.TempChangeLast3hC = fp(c) }
 }
+func withLatestObserved(c float64) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.LatestObservedTempC = fp(c) }
+}
+func withRemainingForecastHigh(c float64) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.RemainingForecastHighC = fp(c) }
+}
 func withObsPoints(n int) summaryOption {
 	return func(s *domain.WeatherFeatureSummary) { s.ObservationPoints = n }
+}
+func withGeneratedAt(t time.Time) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.GeneratedAt = t }
+}
+func withTimezone(tz string) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.Timezone = tz }
+}
+func withTemperatureProfile(profile string) summaryOption {
+	return func(s *domain.WeatherFeatureSummary) { s.TemperatureProfile = profile }
 }
 
 // makeSummary builds a WeatherFeatureSummary with a default forecast high of
@@ -278,8 +301,8 @@ func TestBuildBucketDistribution_Cases(t *testing.T) {
 				// Once 17.8 C has already happened, all buckets up to 17C are impossible.
 				gotLow := sumProbUpTo(d.BucketProbs, 17)
 				if !nearF(gotLow, 0, 1e-9) {
-					t.Errorf("obs close to forecast: buckets from 14C through 17C should be impossible after 17.8C observed, got %.4f",
-						gotLow)
+					t.Errorf("obs close to forecast: buckets from %s through 17C should be impossible after 17.8C observed, got %.4f",
+						bucketLabel(bucketFloorC), gotLow)
 				}
 				baseLow := sumProbUpTo(baseline.BucketProbs, 17)
 				if baseLow <= gotLow {
@@ -446,6 +469,326 @@ func TestBuildBucketDistribution_ObservedHighSetsHardFloor(t *testing.T) {
 	}
 }
 
+func TestBuildBucketDistribution_LateDayStableHighCollapsesMass(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local15UTC := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local15UTC),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.6),
+		withTempChange3h(0.2),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC > 25.2 {
+		t.Errorf("late stable high should keep ExpectedHighC near observed high: got %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "25C"); got < 0.80 {
+		t.Errorf("25C bucket should dominate late stable day, got %.4f", got)
+	}
+	if got := sumProbFrom(d.BucketProbs, 27); got > 0.01 {
+		t.Errorf("late stable upside >=27C should be tiny, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_StrongRecentWarmingKeepsUpsideMeaningful(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local15UTC := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local15UTC),
+		withForecastHigh(30.0),
+		withObsHigh(30.0),
+		withLatestObserved(30.0),
+		withTempChange3h(3.0),
+		withObsPoints(14),
+		withRemainingForecastHigh(31.2),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC < 30.6 {
+		t.Errorf("strong warming should keep adjacent upside in the center estimate, got %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "31C"); got < 0.35 {
+		t.Errorf("31C should remain meaningful during strong warming, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_AfternoonObservedHighFarBelowForecastLowersExpectedHigh(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local15UTC := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local15UTC),
+		withForecastHigh(24.0),
+		withObsHigh(21.0),
+		withLatestObserved(20.7),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(21.4),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC > 21.5 {
+		t.Errorf("afternoon forecast overshoot should be pulled toward observed high: got %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "24C"); got > 0.01 {
+		t.Errorf("stale 24C forecast bucket should be heavily discounted, got %.4f", got)
+	}
+	if got := sumProbUpTo(d.BucketProbs, 20); !nearF(got, 0, 1e-9) {
+		t.Errorf("observed high remains a hard lower bound; <=20C got %.6f", got)
+	}
+}
+
+func TestBuildBucketDistribution_UsesSummaryTimezoneForLateDayRules(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	utcMorningInNewYork := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC) // 03:00 New York, 15:00 Shanghai
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(utcMorningInNewYork),
+		withTimezone("America/New_York"),
+		withForecastHigh(24.0),
+		withObsHigh(21.0),
+		withLatestObserved(20.8),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(21.2),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC <= 21.5 {
+		t.Errorf("midday New York summary should not trigger late-day collapse, got %.4f", d.ExpectedHighC)
+	}
+}
+
+func TestBuildBucketDistribution_PrefersResolutionHighOverMetarHigh(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local15UTC := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local15UTC),
+		withForecastHigh(26.0),
+		withObsHigh(30.0),
+		withResolutionHigh(26.0),
+		withLatestObserved(30.0),
+		withTempChange3h(0.0),
+		withObsPoints(32),
+		withRemainingForecastHigh(26.2),
+	))
+
+	assertValidDistribution(t, d)
+
+	if got := sumProbUpTo(d.BucketProbs, 25); !nearF(got, 0, 1e-9) {
+		t.Errorf("resolution high should set the settlement floor at 26C, <=25C got %.6f", got)
+	}
+	if got := findProb(d.BucketProbs, "26C"); got < 0.80 {
+		t.Errorf("26C should dominate when Wunderground resolution high is 26C, got %.4f", got)
+	}
+	if got := sumProbFrom(d.BucketProbs, 30); got > 0.01 {
+		t.Errorf("METAR-only 30C should not remain the settlement floor when Wunderground is present, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_CoastalProfileNarrowsAt1330(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1330UTC := time.Date(2026, 5, 5, 5, 30, 0, 0, time.UTC)
+
+	coastal := svc.Build(makeSummary(
+		withGeneratedAt(local1330UTC),
+		withTemperatureProfile(TemperatureProfileCoastalFastLock),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.7),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	))
+	basin := svc.Build(makeSummary(
+		withGeneratedAt(local1330UTC),
+		withTemperatureProfile(TemperatureProfileBasinInland),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.7),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	))
+
+	assertValidDistribution(t, coastal)
+	assertValidDistribution(t, basin)
+
+	coastalObservedProb := findProb(coastal.BucketProbs, "25C")
+	basinObservedProb := findProb(basin.BucketProbs, "25C")
+	if coastalObservedProb < 0.80 {
+		t.Errorf("coastal 13:30 should strongly concentrate on observed bucket, got %.4f", coastalObservedProb)
+	}
+	if coastalObservedProb <= basinObservedProb {
+		t.Errorf("coastal 13:30 should be narrower than basin 13:30: coastal %.4f basin %.4f",
+			coastalObservedProb, basinObservedProb)
+	}
+}
+
+func TestBuildBucketDistribution_CoastalProfileHardLocksAfter1415(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1415UTC := time.Date(2026, 5, 5, 6, 15, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local1415UTC),
+		withTemperatureProfile(TemperatureProfileCoastalFastLock),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.7),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	))
+
+	assertValidDistribution(t, d)
+
+	if got := findProb(d.BucketProbs, "25C"); got < 0.90 {
+		t.Errorf("coastal 14:15 stable high should hard-lock near observed bucket, got %.4f", got)
+	}
+	if got := sumProbFrom(d.BucketProbs, 27); got > 0.01 {
+		t.Errorf("coastal 14:15 upside >=27C should be strongly reduced, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_BasinProfileKeepsWarmingUpsideAt1415(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1415UTC := time.Date(2026, 5, 5, 6, 15, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local1415UTC),
+		withTemperatureProfile(TemperatureProfileBasinInland),
+		withForecastHigh(30.0),
+		withObsHigh(30.0),
+		withLatestObserved(30.0),
+		withTempChange3h(3.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(31.4),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC < 30.8 {
+		t.Errorf("basin 14:15 strong warming should retain upside center, got %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "31C"); got < 0.45 {
+		t.Errorf("basin 14:15 strong warming should keep 31C live, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_NorthProfileSoftLocksAt1400ButKeepsWarmingUpside(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1400UTC := time.Date(2026, 5, 5, 6, 0, 0, 0, time.UTC)
+
+	stable := svc.Build(makeSummary(
+		withGeneratedAt(local1400UTC),
+		withTemperatureProfile(TemperatureProfileNorthInland),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.6),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	))
+	warming := svc.Build(makeSummary(
+		withGeneratedAt(local1400UTC),
+		withTemperatureProfile(TemperatureProfileNorthInland),
+		withForecastHigh(30.0),
+		withObsHigh(30.0),
+		withLatestObserved(30.0),
+		withTempChange3h(3.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(31.2),
+	))
+
+	assertValidDistribution(t, stable)
+	assertValidDistribution(t, warming)
+
+	if got := findProb(stable.BucketProbs, "25C"); got < 0.75 {
+		t.Errorf("north inland 14:00 stable high should start narrowing, got %.4f", got)
+	}
+	if got := findProb(warming.BucketProbs, "31C"); got < 0.35 {
+		t.Errorf("north inland 14:00 strong warming should keep adjacent upside, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_HumidSouthBetweenCoastalAndBasin(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1330UTC := time.Date(2026, 5, 5, 5, 30, 0, 0, time.UTC)
+
+	baseOpts := []summaryOption{
+		withGeneratedAt(local1330UTC),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.6),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	}
+	coastalOpts := append([]summaryOption{}, baseOpts...)
+	coastalOpts = append(coastalOpts, withTemperatureProfile(TemperatureProfileCoastalFastLock))
+	humidOpts := append([]summaryOption{}, baseOpts...)
+	humidOpts = append(humidOpts, withTemperatureProfile(TemperatureProfileHumidSouth))
+	basinOpts := append([]summaryOption{}, baseOpts...)
+	basinOpts = append(basinOpts, withTemperatureProfile(TemperatureProfileBasinInland))
+
+	coastal := svc.Build(makeSummary(coastalOpts...))
+	humid := svc.Build(makeSummary(humidOpts...))
+	basin := svc.Build(makeSummary(basinOpts...))
+
+	assertValidDistribution(t, coastal)
+	assertValidDistribution(t, humid)
+	assertValidDistribution(t, basin)
+
+	coastalObserved := findProb(coastal.BucketProbs, "25C")
+	humidObserved := findProb(humid.BucketProbs, "25C")
+	basinObserved := findProb(basin.BucketProbs, "25C")
+	if !(coastalObserved > humidObserved && humidObserved > basinObserved) {
+		t.Errorf("want coastal > humid_south > basin observed-bucket concentration, got %.4f %.4f %.4f",
+			coastalObserved, humidObserved, basinObserved)
+	}
+}
+
+func TestBuildBucketDistribution_LateHistoricalResolutionLocksObservedBucket(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	generatedAt := time.Date(2026, 5, 5, 13, 40, 0, 0, time.UTC) // 21:40 Asia/Shanghai
+
+	d := svc.Build(makeSummary(
+		withForecastHigh(24.2),
+		withResolutionHigh(23.0),
+		withResolutionSourceType(wunderground.SourceTypeHistoricalObservations),
+		withTempChange3h(0.0),
+		withLatestObserved(22.0),
+		withRemainingForecastHigh(21.9),
+		withObsPoints(47),
+		withTimezone(chinaTimezone),
+		withTemperatureProfile(TemperatureProfileHumidSouth),
+		withGeneratedAt(generatedAt),
+	))
+
+	assertValidDistribution(t, d)
+
+	if !nearF(d.ExpectedHighC, 23.0, 1e-9) {
+		t.Errorf("ExpectedHighC: got %.4f, want locked historical high 23.0", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "23C"); got < 0.95 {
+		t.Errorf("23C should dominate after late historical lock, got %.4f", got)
+	}
+	if got := findProb(d.BucketProbs, "24C"); got > 0.05 {
+		t.Errorf("24C upside should be tiny after late historical lock, got %.4f", got)
+	}
+}
+
 // TestBuildBucketDistribution_MetadataPropagation verifies that station code,
 // target date, and generated-at are correctly propagated to the output.
 func TestBuildBucketDistribution_MetadataPropagation(t *testing.T) {
@@ -511,10 +854,10 @@ func TestBuildBucketDistribution_NilSummaryPanics(t *testing.T) {
 // TestFindProb verifies the findProb helper returns -1 for missing labels.
 func TestFindProb(t *testing.T) {
 	probs := []domain.BucketProbability{
-		{Label: "14C or below", Prob: 0.10},
+		{Label: bucketLabel(bucketFloorC), Prob: 0.10},
 		{Label: "18C", Prob: 0.40},
 		{Label: "19C", Prob: 0.35},
-		{Label: "25C or above", Prob: 0.15},
+		{Label: bucketLabel(bucketCeilingC), Prob: 0.15},
 	}
 
 	if got := findProb(probs, "18C"); !nearF(got, 0.40, 1e-9) {

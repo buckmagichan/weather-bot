@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -143,7 +144,7 @@ func TestParseOutput_pure_json(t *testing.T) {
 }
 
 func TestParseOutput_null_secondary_risk(t *testing.T) {
-	raw := `{"predicted_best_bucket":"14C or below","secondary_risk_bucket":null,"confidence":0.6,"key_reasons":["sparse data","limited coverage"],"risk_flags":[],"next_check_in_minutes":30}`
+	raw := `{"predicted_best_bucket":"-20C or below","secondary_risk_bucket":null,"confidence":0.6,"key_reasons":["sparse data","limited coverage"],"risk_flags":[],"next_check_in_minutes":30}`
 	result, err := parseOutput([]byte(raw))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -187,6 +188,15 @@ func TestParseOutput_malformed_json_returns_error(t *testing.T) {
 	_, err := parseOutput(raw)
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
+	}
+}
+
+func TestParseOutput_rateLimitReturnsSentinelError(t *testing.T) {
+	raw := []byte(`RateLimitError [HTTP 429]
+{'message': "You've reached your usage limit", 'type': 'rate_limit_reached_error'}`)
+	_, err := parseOutput(raw)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("parseOutput error: got %v, want ErrRateLimited", err)
 	}
 }
 

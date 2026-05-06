@@ -10,13 +10,15 @@ import (
 )
 
 type fakeMETARObservationClient struct {
-	reports []aviationweather.METARReport
-	err     error
-	called  bool
+	reports    []aviationweather.METARReport
+	err        error
+	called     bool
+	lastParams aviationweather.METARParams
 }
 
 func (f *fakeMETARObservationClient) METAR(ctx context.Context, p aviationweather.METARParams) ([]aviationweather.METARReport, error) {
 	f.called = true
+	f.lastParams = p
 	return f.reports, f.err
 }
 
@@ -43,11 +45,17 @@ func TestFetchTodayObservations_FiltersToTodayAndSortsAscending(t *testing.T) {
 	if !client.called {
 		t.Fatal("METAR was not called")
 	}
+	if got := client.lastParams.IDs; len(got) != 1 || got[0] != "ZSPD" {
+		t.Fatalf("METAR IDs: got %v, want [ZSPD]", got)
+	}
 	if len(rows) != 2 {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
 	if rows[0].ObservedAt.After(rows[1].ObservedAt) {
 		t.Fatal("rows are not sorted ascending by ObservedAt")
+	}
+	if rows[0].StationCode != "ZSPD" || rows[1].StationCode != "ZSPD" {
+		t.Fatalf("StationCode: got %q/%q, want ZSPD", rows[0].StationCode, rows[1].StationCode)
 	}
 }
 
@@ -134,12 +142,56 @@ func TestFetchTodayObservations_ReturnsMETARError(t *testing.T) {
 	}
 }
 
+func TestFetchTodayObservations_UsesConfiguredStation(t *testing.T) {
+	client := &fakeMETARObservationClient{
+		reports: []aviationweather.METARReport{
+			{ICAOID: "ZSPD", ReportTime: "2026-04-18T12:00:00.000Z", Temp: floatPtr(15)},
+			{ICAOID: "ZUCK", ReportTime: "2026-04-18T12:30:00.000Z", Temp: floatPtr(24)},
+		},
+	}
+	now := func() time.Time {
+		return time.Date(2026, 4, 18, 21, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	}
+	svc, err := NewBuildableFetchObservationServiceForStation(client, WeatherStation{
+		Code:     "ZUCK",
+		Timezone: chinaTimezone,
+	}, now)
+	if err != nil {
+		t.Fatalf("init service: %v", err)
+	}
+
+	rows, err := svc.FetchTodayObservations(context.Background())
+	if err != nil {
+		t.Fatalf("FetchTodayObservations: %v", err)
+	}
+	if got := client.lastParams.IDs; len(got) != 1 || got[0] != "ZUCK" {
+		t.Fatalf("METAR IDs: got %v, want [ZUCK]", got)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].StationCode != "ZUCK" {
+		t.Fatalf("StationCode: got %q, want ZUCK", rows[0].StationCode)
+	}
+	if rows[0].TempC != 24 {
+		t.Fatalf("TempC: got %.1f, want 24", rows[0].TempC)
+	}
+}
+
 // NewBuildableFetchObservationService mirrors the production constructor but
 // lets tests inject a fake client.
 func NewBuildableFetchObservationService(client metarObservationClient, now func() time.Time) (*FetchObservationService, error) {
-	loc, err := time.LoadLocation(obsTimezone)
+	return NewBuildableFetchObservationServiceForStation(client, DefaultWeatherStation(), now)
+}
+
+func NewBuildableFetchObservationServiceForStation(
+	client metarObservationClient,
+	station WeatherStation,
+	now func() time.Time,
+) (*FetchObservationService, error) {
+	loc, err := station.Location()
 	if err != nil {
 		return nil, err
 	}
-	return &FetchObservationService{client: client, loc: loc, now: now}, nil
+	return &FetchObservationService{client: client, station: station, loc: loc, now: now}, nil
 }

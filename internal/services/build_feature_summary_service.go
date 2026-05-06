@@ -62,10 +62,36 @@ func (s *BuildFeatureSummaryService) Build(
 	stationCode, targetDate string,
 	now time.Time,
 ) (*domain.WeatherFeatureSummary, error) {
+	return s.BuildWithTimezone(ctx, stationCode, targetDate, summarySvcTimezone, now)
+}
+
+func (s *BuildFeatureSummaryService) BuildWithTimezone(
+	ctx context.Context,
+	stationCode, targetDate, timezone string,
+	now time.Time,
+) (*domain.WeatherFeatureSummary, error) {
+	return s.BuildWithStationProfile(ctx, stationCode, targetDate, timezone, "", now)
+}
+
+func (s *BuildFeatureSummaryService) BuildWithStationProfile(
+	ctx context.Context,
+	stationCode, targetDate, timezone, temperatureProfile string,
+	now time.Time,
+) (*domain.WeatherFeatureSummary, error) {
+	if timezone == "" {
+		timezone = summarySvcTimezone
+	}
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return nil, fmt.Errorf("build feature summary: load timezone %q: %w", timezone, err)
+	}
+
 	summary := &domain.WeatherFeatureSummary{
-		StationCode:     stationCode,
-		TargetDateLocal: targetDate,
-		GeneratedAt:     now.UTC(),
+		StationCode:        stationCode,
+		TargetDateLocal:    targetDate,
+		Timezone:           timezone,
+		TemperatureProfile: temperatureProfile,
+		GeneratedAt:        now.UTC(),
 	}
 
 	// --- Latest forecast snapshot ---
@@ -97,7 +123,7 @@ func (s *BuildFeatureSummaryService) Build(
 	// restrict to "observed so far": rows whose observed_at is at or before now.
 	// This prevents any future-dated rows of the same calendar day from
 	// contaminating derived fields like ObservedHighSoFarC.
-	obs, err := s.obsRepo.ListForDate(ctx, stationCode, targetDate, s.loc)
+	obs, err := s.obsRepo.ListForDate(ctx, stationCode, targetDate, loc)
 	if err != nil {
 		return nil, fmt.Errorf("build feature summary: list observations: %w", err)
 	}
@@ -112,6 +138,7 @@ func (s *BuildFeatureSummaryService) Build(
 	summary.ObservationPoints = len(soFar)
 
 	if len(soFar) == 0 {
+		summary.RemainingForecastHighC = computeRemainingForecastHigh(latest, now)
 		return summary, nil
 	}
 
@@ -133,8 +160,32 @@ func (s *BuildFeatureSummaryService) Build(
 
 	// 3-hour temperature change — restricted to the "observed so far" window.
 	summary.TempChangeLast3hC = computeTempChangeLast3h(soFar)
+	summary.RemainingForecastHighC = computeRemainingForecastHigh(latest, latestAt)
 
 	return summary, nil
+}
+
+func computeRemainingForecastHigh(row repository.ForecastRow, after time.Time) *float64 {
+	if len(row.HourlyTime) == 0 || len(row.HourlyTempC) == 0 {
+		return nil
+	}
+	limit := len(row.HourlyTime)
+	if len(row.HourlyTempC) < limit {
+		limit = len(row.HourlyTempC)
+	}
+
+	var high *float64
+	for i := 0; i < limit; i++ {
+		if !row.HourlyTime[i].After(after) {
+			continue
+		}
+		temp := row.HourlyTempC[i]
+		if high == nil || temp > *high {
+			v := temp
+			high = &v
+		}
+	}
+	return high
 }
 
 // computeTempChangeLast3h returns the temperature change over the last 3 hours:

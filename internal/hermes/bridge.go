@@ -15,6 +15,12 @@ import (
 const defaultHermesBin = "hermes"
 const hermesSkill = "highest-temp-analysis"
 
+var ErrRateLimited = errors.New("hermes rate limited")
+
+func IsRateLimited(err error) bool {
+	return errors.Is(err, ErrRateLimited)
+}
+
 // Bridge calls the Hermes CLI to produce an AnalysisResult from a HermesAnalysisPayload.
 type Bridge struct {
 	bin string
@@ -66,6 +72,9 @@ func buildPrompt(skill string, payloadJSON []byte) string {
 // (which may contain banner text, query echo, and UI chrome) and unmarshals
 // it into an AnalysisResult.
 func parseOutput(raw []byte) (*domain.AnalysisResult, error) {
+	if looksRateLimited(raw) {
+		return nil, ErrRateLimited
+	}
 	result, extracted, err := extractLastAnalysisResult(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse hermes output: %w\nraw output:\n%s", err, string(raw))
@@ -74,6 +83,13 @@ func parseOutput(raw []byte) (*domain.AnalysisResult, error) {
 		return nil, fmt.Errorf("parse hermes output: no valid analysis result found\nraw output:\n%s", string(raw))
 	}
 	return result, nil
+}
+
+func looksRateLimited(raw []byte) bool {
+	lower := bytes.ToLower(raw)
+	return bytes.Contains(lower, []byte("http 429")) ||
+		bytes.Contains(lower, []byte("rate_limit_reached_error")) ||
+		bytes.Contains(lower, []byte("rate limited"))
 }
 
 // extractLastJSONObject locates the last complete top-level JSON object in raw.

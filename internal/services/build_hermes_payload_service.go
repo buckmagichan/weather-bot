@@ -59,15 +59,21 @@ func (s *BuildHermesPayloadService) Build(
 		TargetDateLocal: summary.TargetDateLocal,
 		GeneratedAt:     time.Now().UTC(),
 		FeatureSummary: hermes.FeatureSummaryView{
-			LatestForecastHighC:   round2(summary.LatestForecastHighC),
-			PreviousForecastHighC: roundPtr2(summary.PreviousForecastHighC),
-			ForecastTrendC:        roundPtr2(summary.ForecastTrendC),
-			LatestObservedTempC:   roundPtr2(summary.LatestObservedTempC),
-			ObservedHighSoFarC:    roundPtr2(summary.ObservedHighSoFarC),
-			TempChangeLast3hC:     roundPtr2(summary.TempChangeLast3hC),
-			LatestObservationAt:   summary.LatestObservationAt,
-			ObservationPoints:     summary.ObservationPoints,
-			HourlyPoints:          summary.HourlyPoints,
+			LatestForecastHighC:     round2(summary.LatestForecastHighC),
+			PreviousForecastHighC:   roundPtr2(summary.PreviousForecastHighC),
+			ForecastTrendC:          roundPtr2(summary.ForecastTrendC),
+			RemainingForecastHighC:  roundPtr2(summary.RemainingForecastHighC),
+			LatestObservedTempC:     roundPtr2(summary.LatestObservedTempC),
+			ObservedHighSoFarC:      roundPtr2(summary.ObservedHighSoFarC),
+			TempChangeLast3hC:       roundPtr2(summary.TempChangeLast3hC),
+			ResolutionObservedHighC: roundPtr2(summary.ResolutionObservedHighC),
+			ResolutionSourceURL:     summary.ResolutionSourceURL,
+			ResolutionSourceType:    summary.ResolutionSourceType,
+			LatestObservationAt:     summary.LatestObservationAt,
+			ObservationPoints:       summary.ObservationPoints,
+			HourlyPoints:            summary.HourlyPoints,
+			Timezone:                summary.Timezone,
+			TemperatureProfile:      summary.TemperatureProfile,
 		},
 		BucketDistribution: hermes.BucketDistributionView{
 			ExpectedHighC: round2(dist.ExpectedHighC),
@@ -97,11 +103,11 @@ func computeSanityFlags(s *domain.WeatherFeatureSummary) []string {
 
 	// Observation coverage.
 	switch {
-	case s.ObservationPoints == 0:
-		// No intraday observations — all observation-derived fields are nil.
+	case s.ObservationPoints == 0 && s.ResolutionObservedHighC == nil:
+		// No intraday or resolution observations — all observation-derived fields are nil.
 		flags = append(flags, "no_observation_data")
-	case s.ObservationPoints < 6:
-		// Fewer than 6 hourly rows; limited intraday trend coverage.
+	case s.ObservationPoints < 6 && s.ResolutionObservedHighC == nil:
+		// Fewer than 6 hourly rows and no resolution high; limited intraday trend coverage.
 		flags = append(flags, "limited_observation_coverage")
 	}
 

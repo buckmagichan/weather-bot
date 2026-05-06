@@ -19,14 +19,17 @@ func testSummary(stationCode, targetDate string) *domain.WeatherFeatureSummary {
 	high := 17.5
 	latestObsAt := time.Date(2026, 4, 16, 8, 0, 0, 0, time.UTC)
 	return &domain.WeatherFeatureSummary{
-		StationCode:         stationCode,
-		TargetDateLocal:     targetDate,
-		GeneratedAt:         time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC),
-		LatestForecastHighC: 17.0,
-		ObservedHighSoFarC:  &high,
-		ObservationPoints:   8,
-		HourlyPoints:        24,
-		LatestObservationAt: &latestObsAt,
+		StationCode:          stationCode,
+		TargetDateLocal:      targetDate,
+		Timezone:             chinaTimezone,
+		TemperatureProfile:   TemperatureProfileCoastalFastLock,
+		ResolutionSourceType: "historical_observations",
+		GeneratedAt:          time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC),
+		LatestForecastHighC:  17.0,
+		ObservedHighSoFarC:   &high,
+		ObservationPoints:    8,
+		HourlyPoints:         24,
+		LatestObservationAt:  &latestObsAt,
 	}
 }
 
@@ -39,9 +42,9 @@ func testDist(stationCode, targetDate string) *domain.TemperatureBucketDistribut
 		ExpectedHighC:   17.2,
 		Confidence:      0.75,
 		BucketProbs: []domain.BucketProbability{
-			{Label: "14C or below", Prob: 0.30},
+			{Label: "-20C or below", Prob: 0.30},
 			{Label: "18C", Prob: 0.40},
-			{Label: "19C or above", Prob: 0.30},
+			{Label: "50C or above", Prob: 0.30},
 		},
 	}
 }
@@ -55,6 +58,8 @@ func cleanSummary(stationCode, targetDate string) *domain.WeatherFeatureSummary 
 	return &domain.WeatherFeatureSummary{
 		StationCode:           stationCode,
 		TargetDateLocal:       targetDate,
+		Timezone:              chinaTimezone,
+		TemperatureProfile:    TemperatureProfileNorthInland,
 		GeneratedAt:           time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC),
 		LatestForecastHighC:   17.0,
 		PreviousForecastHighC: &prev,
@@ -98,6 +103,14 @@ func TestBuildHermesPayload(t *testing.T) {
 		if payload.FeatureSummary.ObservationPoints != 8 {
 			t.Errorf("FeatureSummary.ObservationPoints: got %d, want 8",
 				payload.FeatureSummary.ObservationPoints)
+		}
+		if payload.FeatureSummary.TemperatureProfile != TemperatureProfileCoastalFastLock {
+			t.Errorf("FeatureSummary.TemperatureProfile: got %q, want %q",
+				payload.FeatureSummary.TemperatureProfile, TemperatureProfileCoastalFastLock)
+		}
+		if payload.FeatureSummary.ResolutionSourceType != "historical_observations" {
+			t.Errorf("FeatureSummary.ResolutionSourceType: got %q, want historical_observations",
+				payload.FeatureSummary.ResolutionSourceType)
 		}
 
 		// Bucket distribution view spot-checks.
@@ -224,7 +237,7 @@ func TestBuildHermesPayload(t *testing.T) {
 			Confidence:      0.9000000000000021,
 			BucketProbs: []domain.BucketProbability{
 				{Label: "below", Prob: 0.30000000000000004},
-				{Label: "on",    Prob: 0.39999999999999997},
+				{Label: "on", Prob: 0.39999999999999997},
 				{Label: "above", Prob: 0.30000000000000004},
 			},
 		}
@@ -285,6 +298,25 @@ func TestBuildHermesPayload(t *testing.T) {
 		}
 		if !containsFlag(payload.SanityFlags, "observed_high_exceeds_latest_forecast") {
 			t.Errorf("SanityFlags: want observed_high_exceeds_latest_forecast, got %v", payload.SanityFlags)
+		}
+	})
+
+	t.Run("resolution_high_satisfies_observation_coverage", func(t *testing.T) {
+		s := cleanSummary("ZSPD", "2026-04-16")
+		resolutionHigh := 17.0
+		s.ObservationPoints = 0
+		s.ObservedHighSoFarC = &resolutionHigh
+		s.ResolutionObservedHighC = &resolutionHigh
+
+		payload, err := svc.Build(s, testDist("ZSPD", "2026-04-16"))
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if slices.Contains(payload.SanityFlags, "no_observation_data") {
+			t.Errorf("resolution high should prevent no_observation_data flag: %v", payload.SanityFlags)
+		}
+		if slices.Contains(payload.SanityFlags, "limited_observation_coverage") {
+			t.Errorf("resolution high should prevent limited_observation_coverage flag: %v", payload.SanityFlags)
 		}
 	})
 

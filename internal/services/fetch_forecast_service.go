@@ -12,45 +12,46 @@ import (
 )
 
 const (
-	// zspdLat and zspdLon target Shanghai Pudong International Airport (ICAO:
-	// ZSPD), the settlement station for this market. These intentionally differ
-	// from generic Shanghai city-centre coordinates (31.2304, 121.4737) so that
-	// the forecast input is aligned with the station used in settlement.
-	zspdLat = 31.1443
-	zspdLon = 121.8083
-
-	zspdTimezone = "Asia/Shanghai"
-	zspdStation  = "ZSPD"
-
 	// Open-Meteo returns hourly time strings as "2006-01-02T15:04" with no
 	// seconds and no timezone suffix. We parse them in the station's local
 	// timezone so the resulting time.Time values carry the correct offset.
 	hourlyTimeLayout = "2006-01-02T15:04"
 )
 
-// FetchForecastService retrieves a daily forecast snapshot for ZSPD using the
-// Open-Meteo API. The timezone location is loaded once at construction time.
+// FetchForecastService retrieves a daily forecast snapshot for a configured
+// market settlement station using the Open-Meteo API. The timezone location is
+// loaded once at construction time.
 type FetchForecastService struct {
-	client *openmeteo.Client
-	loc    *time.Location
+	client  *openmeteo.Client
+	station WeatherStation
+	loc     *time.Location
 }
 
-// NewFetchForecastService creates a FetchForecastService backed by client.
+// NewFetchForecastService creates a FetchForecastService backed by client for
+// the default Shanghai market station.
 // Returns an error if the IANA timezone database cannot be loaded.
 func NewFetchForecastService(client *openmeteo.Client) (*FetchForecastService, error) {
-	loc, err := time.LoadLocation(zspdTimezone)
-	if err != nil {
-		return nil, fmt.Errorf("fetch forecast service: load timezone %s: %w", zspdTimezone, err)
-	}
-	return &FetchForecastService{client: client, loc: loc}, nil
+	return NewFetchForecastServiceForStation(client, DefaultWeatherStation())
 }
 
-// FetchDailySnapshot retrieves today's forecast for ZSPD and returns a
-// ForecastSnapshot covering the full day's hourly data.
+// NewFetchForecastServiceForStation creates a FetchForecastService for station.
+func NewFetchForecastServiceForStation(
+	client *openmeteo.Client,
+	station WeatherStation,
+) (*FetchForecastService, error) {
+	loc, err := station.Location()
+	if err != nil {
+		return nil, fmt.Errorf("fetch forecast service: %w", err)
+	}
+	return &FetchForecastService{client: client, station: station, loc: loc}, nil
+}
+
+// FetchDailySnapshot retrieves today's forecast for the configured station and
+// returns a ForecastSnapshot covering the full day's hourly data.
 func (s *FetchForecastService) FetchDailySnapshot(ctx context.Context) (*domain.ForecastSnapshot, error) {
 	resp, err := s.client.Forecast(ctx, openmeteo.ForecastParams{
-		Latitude:  zspdLat,
-		Longitude: zspdLon,
+		Latitude:  s.station.Latitude,
+		Longitude: s.station.Longitude,
 		Hourly: []string{
 			openmeteo.VarTemperature2m,
 			openmeteo.VarDewPoint2m,
@@ -61,7 +62,7 @@ func (s *FetchForecastService) FetchDailySnapshot(ctx context.Context) (*domain.
 		Daily: []string{
 			openmeteo.VarTemperature2mMax,
 		},
-		Timezone:     zspdTimezone,
+		Timezone:     s.station.Timezone,
 		ForecastDays: 1,
 		// Wind speed unit is left at the API default (km/h), which matches
 		// the HourlyWindKMH field name in domain.ForecastSnapshot.
@@ -83,7 +84,7 @@ func (s *FetchForecastService) FetchDailySnapshot(ctx context.Context) (*domain.
 	}
 
 	return &domain.ForecastSnapshot{
-		StationCode:      zspdStation,
+		StationCode:      s.station.Code,
 		TargetDateLocal:  resp.Daily.Time[0],
 		FetchedAt:        time.Now().UTC(),
 		Timezone:         resp.Timezone,

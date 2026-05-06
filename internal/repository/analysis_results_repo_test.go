@@ -43,9 +43,9 @@ func makeAnalysisRecord(stationCode, targetDate string) *domain.AnalysisPersiste
 			ExpectedHighC:   18.1,
 			Confidence:      0.9,
 			BucketProbs: []domain.BucketProbability{
-				{Label: "14C or below", Prob: 0.20},
+				{Label: "-20C or below", Prob: 0.20},
 				{Label: "18C", Prob: 0.50},
-				{Label: "19C or above", Prob: 0.30},
+				{Label: "50C or above", Prob: 0.30},
 			},
 		},
 		HermesPayloadJSON: json.RawMessage(`{"station_code":"` + stationCode + `","target_date_local":"` + targetDate + `"}`),

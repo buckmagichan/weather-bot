@@ -152,18 +152,22 @@ func toJSONB(v any) (json.RawMessage, error) {
 	return json.RawMessage(b), nil
 }
 
-// ForecastRow carries the scalar fields needed by the feature-summary pipeline.
-// The hourly JSONB arrays are not deserialized; HourlyPoints is obtained via
-// jsonb_array_length computed in SQL.
+// ForecastRow carries the fields needed by the feature-summary pipeline.
+// HourlyTime and HourlyTempC are deserialized so services can estimate the
+// remaining model upside after the latest observation.
 type ForecastRow struct {
 	ForecastHighC float64
 	FetchedAt     time.Time
 	HourlyPoints  int
+	HourlyTime    []time.Time
+	HourlyTempC   []float64
 }
 
 const getLatestForecastSQL = `
 SELECT forecast_high_c,
        fetched_at,
+       hourly_time_json,
+       hourly_temp_c_json,
        jsonb_array_length(hourly_time_json),
        jsonb_array_length(hourly_temp_c_json),
        jsonb_array_length(hourly_dew_point_c_json),
@@ -190,8 +194,10 @@ func (r *ForecastSnapshotRepo) GetLatestForDate(
 			fmt.Errorf("get latest forecast: parse date %q: %w", targetDate, err)
 	}
 	var timeLen, tempLen, dewLen, cloudLen, precipLen, windLen int
+	var hourlyTimeJSON, hourlyTempJSON json.RawMessage
 	scanErr := r.pool.QueryRow(ctx, getLatestForecastSQL, stationCode, parsed).
 		Scan(&row.ForecastHighC, &row.FetchedAt,
+			&hourlyTimeJSON, &hourlyTempJSON,
 			&timeLen, &tempLen, &dewLen, &cloudLen, &precipLen, &windLen)
 	if errors.Is(scanErr, pgx.ErrNoRows) {
 		return ForecastRow{}, false, nil
@@ -207,12 +213,17 @@ func (r *ForecastSnapshotRepo) GetLatestForDate(
 		)
 	}
 	row.HourlyPoints = timeLen
+	if err := decodeForecastHourly(hourlyTimeJSON, hourlyTempJSON, &row); err != nil {
+		return ForecastRow{}, false, fmt.Errorf("get latest forecast: decode hourly: %w", err)
+	}
 	return row, true, nil
 }
 
 const getPreviousForecastSQL = `
 SELECT forecast_high_c,
        fetched_at,
+       hourly_time_json,
+       hourly_temp_c_json,
        jsonb_array_length(hourly_time_json),
        jsonb_array_length(hourly_temp_c_json),
        jsonb_array_length(hourly_dew_point_c_json),
@@ -241,8 +252,10 @@ func (r *ForecastSnapshotRepo) GetPreviousForDate(
 			fmt.Errorf("get previous forecast: parse date %q: %w", targetDate, err)
 	}
 	var timeLen, tempLen, dewLen, cloudLen, precipLen, windLen int
+	var hourlyTimeJSON, hourlyTempJSON json.RawMessage
 	scanErr := r.pool.QueryRow(ctx, getPreviousForecastSQL, stationCode, parsed).
 		Scan(&row.ForecastHighC, &row.FetchedAt,
+			&hourlyTimeJSON, &hourlyTempJSON,
 			&timeLen, &tempLen, &dewLen, &cloudLen, &precipLen, &windLen)
 	if errors.Is(scanErr, pgx.ErrNoRows) {
 		return ForecastRow{}, false, nil
@@ -258,5 +271,30 @@ func (r *ForecastSnapshotRepo) GetPreviousForDate(
 		)
 	}
 	row.HourlyPoints = timeLen
+	if err := decodeForecastHourly(hourlyTimeJSON, hourlyTempJSON, &row); err != nil {
+		return ForecastRow{}, false, fmt.Errorf("get previous forecast: decode hourly: %w", err)
+	}
 	return row, true, nil
+}
+
+func decodeForecastHourly(
+	hourlyTimeJSON, hourlyTempJSON json.RawMessage,
+	row *ForecastRow,
+) error {
+	if len(hourlyTimeJSON) == 0 || len(hourlyTempJSON) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(hourlyTimeJSON, &row.HourlyTime); err != nil {
+		return fmt.Errorf("hourly_time_json: %w", err)
+	}
+	if err := json.Unmarshal(hourlyTempJSON, &row.HourlyTempC); err != nil {
+		return fmt.Errorf("hourly_temp_c_json: %w", err)
+	}
+	if len(row.HourlyTime) != row.HourlyPoints || len(row.HourlyTempC) != row.HourlyPoints {
+		return fmt.Errorf(
+			"hourly decoded length mismatch: points=%d time=%d temp=%d",
+			row.HourlyPoints, len(row.HourlyTime), len(row.HourlyTempC),
+		)
+	}
+	return nil
 }

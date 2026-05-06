@@ -1,7 +1,7 @@
 ---
 name: highest-temp-analysis
-description: Explain a structured daily highest-temperature bucket forecast for ZSPD and return JSON analysis.
-version: 1.3.1
+description: Explain a structured daily highest-temperature bucket forecast for an airport station and return JSON analysis.
+version: 1.4.3
 author: wanghan
 license: MIT
 ---
@@ -29,12 +29,30 @@ Your job is to:
 
 The observation data in the payload may come from METAR reports rather than
 hourly model/interpolated data. That means:
+- `station_code` may be any configured market airport, currently one of:
+  `ZBAA`, `ZSPD`, `ZGGG`, `ZUUU`, `ZUCK`, `ZHHH`, `ZSQD`
+- `timezone` is the station-local IANA timezone used by the deterministic
+  model's late-day calibration
+- `temperature_profile` identifies the station's city-aware calibration profile:
+  `coastal_fast_lock`, `humid_south`, `north_inland`, or `basin_inland`
 - `observation_points` may be greater than 24 for the same local date
 - `latest_observation_at` may land on `:00` or `:30`
-- `bucket_probs` may contain many one-degree buckets rather than only a few
-  coarse ranges
+- `resolution_observed_high_c`, when present, is a Wunderground-derived
+  whole-degree daily high aligned to the market resolution source
+- `resolution_source_type` explains which Wunderground payload supplied the
+  high. `historical_observations` is preferred; `current_observation_fallback`
+  and `page_fallback` are useful but less settlement-aligned.
+- `remaining_forecast_high_c`, when present, is the latest model's highest
+  hourly temperature after the latest observation
+- `bucket_probs` normally contains the full one-degree range from
+  `"-20C or below"` through `"50C or above"` (71 labels total); examples in
+  this document are shortened for readability
 - once `observed_high_so_far_c` already guarantees a bucket floor, you should
   treat lower buckets as effectively ruled out
+- `bucket_probs` already encode the Go model's late-day calibration,
+  Wunderground/METAR hard floor, city-aware timing profile, and
+  forecast/momentum adjustments; do not inflate adjacent upside risk unless the
+  probabilities genuinely support it
 
 You may reason internally. Your final output is a strict JSON object consumed directly by a Go JSON parser. No cleanup, no repair, no post-processing will be applied. The output must be machine-parseable as-is.
 
@@ -51,18 +69,24 @@ The input will be a structured JSON payload with this shape:
     "latest_forecast_high_c": 17.8,
     "previous_forecast_high_c": 16.9,
     "forecast_trend_c": 0.9,
+    "remaining_forecast_high_c": 18.2,
     "latest_observed_temp_c": 14.4,
     "observed_high_so_far_c": 18.0,
     "temp_change_last_3h_c": -0.6,
+    "resolution_observed_high_c": 18.0,
+    "resolution_source_url": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD/date/2026-04-16",
+    "resolution_source_type": "historical_observations",
     "latest_observation_at": "2026-04-16T21:30:00+08:00",
     "observation_points": 31,
-    "hourly_points": 24
+    "hourly_points": 24,
+    "timezone": "Asia/Shanghai",
+    "temperature_profile": "coastal_fast_lock"
   },
   "bucket_distribution": {
     "expected_high_c": 18.09,
     "confidence": 0.9,
     "bucket_probs": [
-      { "label": "14C or below", "prob": 0.0020 },
+      { "label": "-20C or below", "prob": 0.0020 },
       { "label": "17C", "prob": 0.2177 },
       { "label": "18C", "prob": 0.4923 },
       { "label": "19C", "prob": 0.2584 },
@@ -101,7 +125,7 @@ Your entire response MUST be exactly this JSON object and nothing else:
 | `confidence` | number | Required. Number between 0 and 1 inclusive. Copy or adjust from `bucket_distribution.confidence`. |
 | `key_reasons` | array of strings | Required. 2 to 4 short plain-text strings. Each item is a sentence fragment, not an object. |
 | `risk_flags` | array of strings | Required. May be empty (`[]`). Each item is a plain string. Never an array of objects. |
-| `next_check_in_minutes` | integer | Required. Prefer `30`, `60`, or `90`. Use a shorter interval when data is sparse or sanity flags are present. |
+| `next_check_in_minutes` | integer | Required. Prefer `30`, `60`, or `90`. Use a shorter interval when data is sparse or sanity flags are present, except when the late-evening historical lock rule below applies. |
 
 ### Reasoning guidance
 
@@ -115,14 +139,26 @@ Your entire response MUST be exactly this JSON object and nothing else:
   on the top 2 to 3 most likely buckets rather than enumerating the whole list.
 - Prefer a `secondary_risk_bucket` only when it represents a meaningful nearby
   alternative outcome. If the runner-up probability is negligible, use `null`.
+- If the top bucket probability is at least `0.90`, set
+  `secondary_risk_bucket` to `null` unless the runner-up probability is at
+  least `0.15` and there is a clear still-live risk such as active warming,
+  sparse observations, or no historical resolution source.
 - When the top two buckets are close, treat the adjacent runner-up as the main
   risk to mention. Avoid choosing a distant or much lower-probability bucket.
 - If `observed_high_so_far_c` is already equal to the top bucket floor, frame
-  remaining uncertainty as whether the day finishes in that bucket or a higher
-  neighbouring bucket.
-- Use `30` minutes when the outcome is still actively moving or the top buckets
+  remaining uncertainty from the probabilities, not from adjacency alone. A
+  higher neighbouring bucket is only a secondary risk when its probability is
+  meaningfully live.
+- Use `30` minutes when the outcome is still actively warming or the top buckets
   are tightly clustered; prefer `60` or `90` when late-day coverage is strong
-  and cooling suggests the daily high is already in.
+  and cooling suggests the daily high is already in. If
+  `resolution_source_type` is `historical_observations`, the top bucket is
+  highly concentrated, and station-local time is evening, prefer `90`.
+- Late-evening historical lock rule: when station-local time is 21:30 or later,
+  `resolution_source_type` is `historical_observations`, the top bucket
+  probability is at least `0.85`, and `temp_change_last_3h_c` is not positive,
+  set `secondary_risk_bucket` to `null` and `next_check_in_minutes` to `90`
+  unless you explicitly name a still-live risk in `risk_flags`.
 
 ### Conflict handling and self-correction
 
@@ -155,9 +191,9 @@ Your entire response MUST be exactly this JSON object and nothing else:
   4. data coverage quality when it materially affects confidence
 - Do not waste a `key_reasons` slot on buckets whose probability is effectively
   zero unless a sanity flag makes them operationally relevant.
-- If `observed_high_so_far_c` already matches the current best bucket, the most
-  useful secondary risk is usually the next warmer adjacent bucket, not a lower
-  bucket that has already been ruled out.
+- If `observed_high_so_far_c` already matches the current best bucket, a warmer
+  adjacent bucket is only the secondary risk when its probability is
+  meaningfully live; otherwise use `null` or the true runner-up.
 - If `sanity_flags` is present, prefer reusing those exact labels in
   `risk_flags`. Do not invent novel flag names unless the input already
   provides them.
@@ -271,7 +307,7 @@ Let me know if you need more detail.
 **Extra forbidden key** — invalid:
 
 ```
-{ "predicted_best_bucket": "18C", "downside_risk": "14C or below", ... }
+{ "predicted_best_bucket": "18C", "downside_risk": "-20C or below", ... }
 ```
 
 **Semantically invalid bucket below observed floor** — invalid:

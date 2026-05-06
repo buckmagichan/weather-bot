@@ -31,11 +31,15 @@ func (f *fakeForecastStore) GetPreviousForDate(_ context.Context, _, _ string) (
 }
 
 type fakeObservationStore struct {
-	obs []domain.ObservationSnapshot
-	err error
+	obs     []domain.ObservationSnapshot
+	err     error
+	locName string
 }
 
-func (f *fakeObservationStore) ListForDate(_ context.Context, _, _ string, _ *time.Location) ([]domain.ObservationSnapshot, error) {
+func (f *fakeObservationStore) ListForDate(_ context.Context, _, _ string, loc *time.Location) ([]domain.ObservationSnapshot, error) {
+	if loc != nil {
+		f.locName = loc.String()
+	}
 	return f.obs, f.err
 }
 
@@ -302,6 +306,36 @@ func TestBuildFeatureSummary(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "G_remaining_forecast_high_after_latest_observation",
+			fc: &fakeForecastStore{
+				latestFound: true,
+				latestRow: repository.ForecastRow{
+					ForecastHighC: 21.0,
+					FetchedAt:     fetchedAt,
+					HourlyPoints:  5,
+					HourlyTime: []time.Time{
+						t0,
+						t0.Add(1 * time.Hour),
+						t0.Add(2 * time.Hour),
+						t0.Add(3 * time.Hour),
+						t0.Add(4 * time.Hour),
+					},
+					HourlyTempC: []float64{14.0, 15.0, 17.0, 20.0, 19.0},
+				},
+			},
+			oc: &fakeObservationStore{obs: []domain.ObservationSnapshot{
+				{StationCode: "ZSPD", ObservedAt: t0, Timezone: "Asia/Shanghai", TempC: 14.0},
+				{StationCode: "ZSPD", ObservedAt: t0.Add(2 * time.Hour), Timezone: "Asia/Shanghai", TempC: 17.0},
+			}},
+			now: t0.Add(2*time.Hour + 30*time.Minute),
+			check: func(t *testing.T, s *domain.WeatherFeatureSummary) {
+				t.Helper()
+				if s.RemainingForecastHighC == nil || !near(*s.RemainingForecastHighC, 20.0) {
+					t.Errorf("RemainingForecastHighC: got %v, want 20.0", s.RemainingForecastHighC)
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -389,5 +423,56 @@ func TestComputeTempChangeLast3h(t *testing.T) {
 				t.Errorf("got %.4f, want %.4f", *got, *tc.want)
 			}
 		})
+	}
+}
+
+func TestBuildFeatureSummaryWithTimezone(t *testing.T) {
+	t0 := time.Date(2026, 4, 14, 10, 0, 0, 0, time.UTC)
+	obsStore := &fakeObservationStore{}
+	svc := newSvc(t, &fakeForecastStore{
+		latestRow: repository.ForecastRow{
+			ForecastHighC: 17.2,
+			FetchedAt:     t0,
+			HourlyPoints:  24,
+		},
+		latestFound: true,
+	}, obsStore)
+
+	summary, err := svc.BuildWithTimezone(context.Background(), "KJFK", "2026-04-14", "America/New_York", t0)
+	if err != nil {
+		t.Fatalf("BuildWithTimezone: %v", err)
+	}
+	if summary.Timezone != "America/New_York" {
+		t.Errorf("Timezone: got %q, want America/New_York", summary.Timezone)
+	}
+	if obsStore.locName != "America/New_York" {
+		t.Errorf("ListForDate loc: got %q, want America/New_York", obsStore.locName)
+	}
+}
+
+func TestBuildFeatureSummaryWithStationProfile(t *testing.T) {
+	t0 := time.Date(2026, 4, 14, 10, 0, 0, 0, time.UTC)
+	svc := newSvc(t, &fakeForecastStore{
+		latestRow: repository.ForecastRow{
+			ForecastHighC: 17.2,
+			FetchedAt:     t0,
+			HourlyPoints:  24,
+		},
+		latestFound: true,
+	}, &fakeObservationStore{})
+
+	summary, err := svc.BuildWithStationProfile(
+		context.Background(),
+		"ZSPD",
+		"2026-04-14",
+		chinaTimezone,
+		TemperatureProfileCoastalFastLock,
+		t0,
+	)
+	if err != nil {
+		t.Fatalf("BuildWithStationProfile: %v", err)
+	}
+	if summary.TemperatureProfile != TemperatureProfileCoastalFastLock {
+		t.Errorf("TemperatureProfile: got %q, want %q", summary.TemperatureProfile, TemperatureProfileCoastalFastLock)
 	}
 }

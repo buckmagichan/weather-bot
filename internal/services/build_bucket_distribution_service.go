@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/buckmagichan/weather-bot/internal/domain"
+	"github.com/buckmagichan/weather-bot/internal/providers/wunderground"
 )
 
 // BuildBucketDistributionService converts a WeatherFeatureSummary into a
@@ -14,9 +15,68 @@ import (
 type BuildBucketDistributionService struct{}
 
 const (
-	bucketFloorC   = 14
-	bucketCeilingC = 25
+	bucketFloorC   = -20
+	bucketCeilingC = 50
 )
+
+type temperatureProfileConfig struct {
+	softLockHour              float64
+	hardLockHour              float64
+	stableSigma               float64
+	hardLockSigma             float64
+	overshootAdjustmentWeight float64
+	strongWarmingUpsideC      float64
+	strongWarmingUntilHour    float64
+}
+
+var defaultTemperatureProfileConfig = temperatureProfileConfig{
+	softLockHour:              14.0,
+	hardLockHour:              15.0,
+	stableSigma:               0.35,
+	hardLockSigma:             0.25,
+	overshootAdjustmentWeight: 0.45,
+	strongWarmingUpsideC:      0.65,
+	strongWarmingUntilHour:    17.0,
+}
+
+var temperatureProfileConfigs = map[string]temperatureProfileConfig{
+	TemperatureProfileCoastalFastLock: {
+		softLockHour:              13.0,
+		hardLockHour:              14.0,
+		stableSigma:               0.30,
+		hardLockSigma:             0.22,
+		overshootAdjustmentWeight: 0.55,
+		strongWarmingUpsideC:      0.35,
+		strongWarmingUntilHour:    14.0,
+	},
+	TemperatureProfileHumidSouth: {
+		softLockHour:              13.5,
+		hardLockHour:              14.5,
+		stableSigma:               0.34,
+		hardLockSigma:             0.25,
+		overshootAdjustmentWeight: 0.50,
+		strongWarmingUpsideC:      0.50,
+		strongWarmingUntilHour:    15.0,
+	},
+	TemperatureProfileNorthInland: {
+		softLockHour:              14.0,
+		hardLockHour:              15.0,
+		stableSigma:               0.35,
+		hardLockSigma:             0.25,
+		overshootAdjustmentWeight: 0.45,
+		strongWarmingUpsideC:      0.65,
+		strongWarmingUntilHour:    16.0,
+	},
+	TemperatureProfileBasinInland: {
+		softLockHour:              14.5,
+		hardLockHour:              15.0,
+		stableSigma:               0.45,
+		hardLockSigma:             0.30,
+		overshootAdjustmentWeight: 0.38,
+		strongWarmingUpsideC:      0.85,
+		strongWarmingUntilHour:    16.5,
+	},
+}
 
 // NewBuildBucketDistributionService creates a BuildBucketDistributionService.
 func NewBuildBucketDistributionService() *BuildBucketDistributionService {
@@ -32,14 +92,18 @@ func (s *BuildBucketDistributionService) Build(
 	if summary == nil {
 		panic("BuildBucketDistributionService.Build: summary must not be nil")
 	}
+	observedHigh := effectiveObservedHigh(summary)
 	adjusted := adjustedHigh(summary)
-	if summary.ObservedHighSoFarC != nil && adjusted < *summary.ObservedHighSoFarC {
+	if observedHigh != nil && adjusted < *observedHigh {
 		// The final daily high cannot be below a temperature we have already
 		// observed, so clamp the point estimate to that hard lower bound.
-		adjusted = *summary.ObservedHighSoFarC
+		adjusted = *observedHigh
+	}
+	if observedHigh != nil && historicalResolutionLocked(summary, *observedHigh) {
+		adjusted = *observedHigh
 	}
 	spread := computeSpread(summary)
-	probs := bucketProbabilities(adjusted, spread, summary.ObservedHighSoFarC)
+	probs := bucketProbabilities(adjusted, spread, observedHigh)
 	conf := computeConfidence(summary)
 
 	return &domain.TemperatureBucketDistribution{
@@ -52,11 +116,14 @@ func (s *BuildBucketDistributionService) Build(
 	}
 }
 
-// adjustedHigh refines the forecast high using three independent signals.
-// Each rule is applied additively and independently; they do not interact.
-// The weights and caps are first-pass values — tune after backtesting.
+// adjustedHigh refines the forecast high using forecast trend, observed high,
+// recent momentum, station-local time, and remaining model upside. The weights
+// and caps are first-pass values — tune after backtesting.
 func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 	adj := s.LatestForecastHighC
+	observedHigh := effectiveObservedHigh(s)
+	localHour := stationLocalHour(s)
+	profile := temperatureProfileConfigFor(s.TemperatureProfile)
 
 	// Rule 1: Forecast trend.
 	// If the forecast has been drifting up or down between model runs, carry
@@ -70,26 +137,61 @@ func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 	// Rule 2: Observed high vs forecast.
 	// When reality has already met or exceeded the model, revise the expected
 	// high upward (30% of the gap). When observations are significantly below
-	// the forecast (> 2 C gap), apply a small downward revision (15% of gap)
-	// because the model may be too optimistic.
-	if s.ObservedHighSoFarC != nil {
-		gap := *s.ObservedHighSoFarC - s.LatestForecastHighC
+	// the forecast (> 2 C gap), apply a downward revision that strengthens in
+	// the afternoon because stale model highs become less credible late in the day.
+	if observedHigh != nil {
+		gap := *observedHigh - s.LatestForecastHighC
 		if gap >= 0 {
 			adj += gap * 0.30
 		} else if gap < -2.0 {
-			adj += gap * 0.15 // gap is negative, so this subtracts
+			weight := 0.15
+			if isSoftLocked(localHour, profile) {
+				weight = 0.35
+			}
+			if isSoftLocked(localHour, profile) && stableOrCooling(s, *observedHigh) {
+				weight = profile.overshootAdjustmentWeight
+			}
+			adj += gap * weight // gap is negative, so this subtracts
 		}
 	}
 
 	// Rule 3: Recent 3-hour momentum.
-	// Only acts on strong signals (> 1 C change over the last 3 hours).
-	// A gentle nudge of ±0.1 C avoids over-fitting to short-term noise.
+	// Only acts on strong signals (> 1 C change over the last 3 hours). Strong
+	// late-day warming is allowed to keep adjacent warmer buckets live; cooling
+	// modestly pulls back model optimism.
 	if s.TempChangeLast3hC != nil {
 		switch {
-		case *s.TempChangeLast3hC > 1.0:
-			adj += 0.10
+		case *s.TempChangeLast3hC >= 1.0:
+			adj += clamp(0.15+(*s.TempChangeLast3hC-1.0)*0.20, 0.15, 0.65)
 		case *s.TempChangeLast3hC < -1.0:
-			adj -= 0.10
+			adj -= 0.20
+		}
+	}
+
+	if observedHigh != nil {
+		obs := *observedHigh
+		if strongRecentWarming(s) && localHour < profile.strongWarmingUntilHour {
+			adj = math.Max(adj, obs+profile.strongWarmingUpsideC)
+		}
+		if isSoftLocked(localHour, profile) && !strongRecentWarming(s) {
+			forecastGap := s.LatestForecastHighC - obs
+			if forecastGap >= 2.0 {
+				allowedUpside := 0.75
+				if isHardLocked(localHour, profile) {
+					allowedUpside = 0.35
+				}
+				if stableOrCooling(s, obs) {
+					allowedUpside = 0.25
+				}
+				if s.RemainingForecastHighC != nil {
+					remainingUpside := math.Max(0, *s.RemainingForecastHighC-obs)
+					allowedUpside = math.Min(allowedUpside, remainingUpside)
+				}
+				adj = math.Min(adj, obs+allowedUpside)
+			}
+			if stableOrCooling(s, obs) && remainingForecastDoesNotExceedObserved(s, obs) {
+				adj = math.Min(adj, obs+0.15)
+			}
 		}
 	}
 
@@ -100,10 +202,23 @@ func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 // into a probability distribution. More data → narrower spread → sharper probs.
 // These values are first-pass — tune after backtesting.
 func computeSpread(s *domain.WeatherFeatureSummary) float64 {
-	hasObs := s.ObservationPoints > 0
+	observedHigh := effectiveObservedHigh(s)
+	hasObs := observedHigh != nil
 	has3hTrend := s.TempChangeLast3hC != nil
+	localHour := stationLocalHour(s)
+	profile := temperatureProfileConfigFor(s.TemperatureProfile)
 
 	switch {
+	case hasObs && historicalResolutionLocked(s, *observedHigh):
+		return profile.hardLockSigma
+	case hasObs && isHardLocked(localHour, profile) && stableOrCooling(s, *observedHigh) && remainingForecastDoesNotExceedObserved(s, *observedHigh):
+		return profile.hardLockSigma
+	case hasObs && isSoftLocked(localHour, profile) && stableOrCooling(s, *observedHigh) && strongObservationCoverage(s):
+		return profile.stableSigma
+	case hasObs && isSoftLocked(localHour, profile) && !strongRecentWarming(s) && s.LatestForecastHighC-*observedHigh >= 2.0:
+		return 0.45
+	case hasObs && strongRecentWarming(s):
+		return 0.80
 	case hasObs && has3hTrend:
 		return 0.75 // confident: ground truth + recent trend
 	case hasObs:
@@ -113,6 +228,76 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 	}
 }
 
+func effectiveObservedHigh(s *domain.WeatherFeatureSummary) *float64 {
+	if s.ResolutionObservedHighC != nil {
+		return s.ResolutionObservedHighC
+	}
+	return s.ObservedHighSoFarC
+}
+
+func temperatureProfileConfigFor(profile string) temperatureProfileConfig {
+	if config, ok := temperatureProfileConfigs[profile]; ok {
+		return config
+	}
+	return defaultTemperatureProfileConfig
+}
+
+func isSoftLocked(localHour float64, config temperatureProfileConfig) bool {
+	return localHour >= config.softLockHour
+}
+
+func isHardLocked(localHour float64, config temperatureProfileConfig) bool {
+	return localHour >= config.hardLockHour
+}
+
+func stationLocalHour(s *domain.WeatherFeatureSummary) float64 {
+	timezone := s.Timezone
+	if timezone == "" {
+		timezone = summarySvcTimezone
+	}
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		panic(fmt.Sprintf("BuildBucketDistributionService: load timezone %q: %v", timezone, err))
+	}
+	local := s.GeneratedAt.In(loc)
+	return float64(local.Hour()) + float64(local.Minute())/60.0
+}
+
+func strongRecentWarming(s *domain.WeatherFeatureSummary) bool {
+	return s.TempChangeLast3hC != nil && *s.TempChangeLast3hC >= 2.0
+}
+
+func stableOrCooling(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
+	if s.TempChangeLast3hC != nil && *s.TempChangeLast3hC <= 0.75 {
+		return true
+	}
+	return s.LatestObservedTempC != nil && *s.LatestObservedTempC <= observedHigh-0.4
+}
+
+func strongObservationCoverage(s *domain.WeatherFeatureSummary) bool {
+	return s.ObservationPoints >= 12 || s.ResolutionObservedHighC != nil
+}
+
+func remainingForecastDoesNotExceedObserved(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
+	return s.RemainingForecastHighC != nil && *s.RemainingForecastHighC <= observedHigh+0.5
+}
+
+func historicalResolutionLocked(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
+	if s.ResolutionSourceType != wunderground.SourceTypeHistoricalObservations {
+		return false
+	}
+	if s.ResolutionObservedHighC == nil {
+		return false
+	}
+	if stationLocalHour(s) < lateEveningLockHour {
+		return false
+	}
+	if s.ObservationPoints < 12 {
+		return false
+	}
+	return stableOrCooling(s, observedHigh)
+}
+
 // bucketProbabilities computes a fine-grained probability distribution over
 // integer temperature buckets using a Gaussian CDF centred on adjustedC with
 // standard deviation sigma.
@@ -120,11 +305,11 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 // Bucket boundaries use half-integer midpoints between neighbouring integer
 // labels. With the current fixed range:
 //
-//	"14C or below" →  X ≤ 14.5
-//	"15C"          →  14.5 < X ≤ 15.5
+//	"-20C or below" →  X ≤ -19.5
+//	"-19C"          →  -19.5 < X ≤ -18.5
 //	...
-//	"24C"          →  23.5 < X ≤ 24.5
-//	"25C or above" →  X > 24.5
+//	"49C"           →  48.5 < X ≤ 49.5
+//	"50C or above"  →  X > 49.5
 //
 // Because the probabilities are derived from a CDF, they sum to exactly 1.0.
 func bucketProbabilities(adjustedC, sigma float64, observedHigh *float64) []domain.BucketProbability {

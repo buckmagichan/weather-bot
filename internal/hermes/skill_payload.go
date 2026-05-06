@@ -19,15 +19,21 @@ import (
 // All numeric fields are pre-rounded by the builder (see build_hermes_payload_service.go
 // for the rounding policy). Nil pointer fields serialise as JSON null.
 type FeatureSummaryView struct {
-	LatestForecastHighC   float64    `json:"latest_forecast_high_c"`
-	PreviousForecastHighC *float64   `json:"previous_forecast_high_c"`
-	ForecastTrendC        *float64   `json:"forecast_trend_c"`
-	LatestObservedTempC   *float64   `json:"latest_observed_temp_c"`
-	ObservedHighSoFarC    *float64   `json:"observed_high_so_far_c"`
-	TempChangeLast3hC     *float64   `json:"temp_change_last_3h_c"`
-	LatestObservationAt   *time.Time `json:"latest_observation_at"`
-	ObservationPoints     int        `json:"observation_points"`
-	HourlyPoints          int        `json:"hourly_points"`
+	LatestForecastHighC     float64    `json:"latest_forecast_high_c"`
+	PreviousForecastHighC   *float64   `json:"previous_forecast_high_c"`
+	ForecastTrendC          *float64   `json:"forecast_trend_c"`
+	RemainingForecastHighC  *float64   `json:"remaining_forecast_high_c"`
+	LatestObservedTempC     *float64   `json:"latest_observed_temp_c"`
+	ObservedHighSoFarC      *float64   `json:"observed_high_so_far_c"`
+	TempChangeLast3hC       *float64   `json:"temp_change_last_3h_c"`
+	ResolutionObservedHighC *float64   `json:"resolution_observed_high_c"`
+	ResolutionSourceURL     string     `json:"resolution_source_url"`
+	ResolutionSourceType    string     `json:"resolution_source_type"`
+	LatestObservationAt     *time.Time `json:"latest_observation_at"`
+	ObservationPoints       int        `json:"observation_points"`
+	HourlyPoints            int        `json:"hourly_points"`
+	Timezone                string     `json:"timezone"`
+	TemperatureProfile      string     `json:"temperature_profile"`
 }
 
 // BucketProbView is a single rounded probability bucket for the Hermes payload.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/buckmagichan/weather-bot/internal/domain"
@@ -11,32 +12,40 @@ import (
 )
 
 const (
-	obsTimezone      = "Asia/Shanghai"
-	obsStation       = "ZSPD"
 	obsLookbackHours = 36
 	knotsToKMH       = 1.852
 )
 
-// FetchObservationService retrieves METAR observation data for ZSPD from the
-// Aviation Weather Center Data API. The timezone location is loaded once at
-// construction time.
+// FetchObservationService retrieves METAR observation data for a configured
+// market settlement station from the Aviation Weather Center Data API. The
+// timezone location is loaded once at construction time.
 type FetchObservationService struct {
-	client metarObservationClient
-	loc    *time.Location
-	now    func() time.Time
+	client  metarObservationClient
+	station WeatherStation
+	loc     *time.Location
+	now     func() time.Time
 }
 
 type metarObservationClient interface {
 	METAR(ctx context.Context, p aviationweather.METARParams) ([]aviationweather.METARReport, error)
 }
 
-// NewFetchObservationService creates a FetchObservationService backed by client.
+// NewFetchObservationService creates a FetchObservationService backed by client
+// for the default Shanghai market station.
 func NewFetchObservationService(client metarObservationClient) (*FetchObservationService, error) {
-	loc, err := time.LoadLocation(obsTimezone)
+	return NewFetchObservationServiceForStation(client, DefaultWeatherStation())
+}
+
+// NewFetchObservationServiceForStation creates a FetchObservationService for station.
+func NewFetchObservationServiceForStation(
+	client metarObservationClient,
+	station WeatherStation,
+) (*FetchObservationService, error) {
+	loc, err := station.Location()
 	if err != nil {
-		return nil, fmt.Errorf("fetch observation service: load timezone: %w", err)
+		return nil, fmt.Errorf("fetch observation service: %w", err)
 	}
-	return &FetchObservationService{client: client, loc: loc, now: time.Now}, nil
+	return &FetchObservationService{client: client, station: station, loc: loc, now: time.Now}, nil
 }
 
 // FetchTodayObservations fetches all available METAR observations whose local
@@ -46,22 +55,28 @@ func (s *FetchObservationService) FetchTodayObservations(ctx context.Context) ([
 	today := s.now().In(s.loc).Format("2006-01-02")
 
 	reports, err := s.client.METAR(ctx, aviationweather.METARParams{
-		IDs:   []string{obsStation},
+		IDs:   []string{s.station.Code},
 		Hours: obsLookbackHours,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fetch today observations: metar: %w", err)
 	}
-	return buildObservationSnapshots(reports, today, s.loc)
+	return buildObservationSnapshots(reports, today, s.station, s.loc)
 }
 
 func buildObservationSnapshots(
 	reports []aviationweather.METARReport,
 	targetDate string,
+	station WeatherStation,
 	loc *time.Location,
 ) ([]domain.ObservationSnapshot, error) {
 	snaps := make([]domain.ObservationSnapshot, 0, len(reports))
 	for _, report := range reports {
+		// Some fake/test or degraded upstream rows may omit ICAOID. When present,
+		// keep only the configured station so mixed responses cannot leak across markets.
+		if report.ICAOID != "" && !strings.EqualFold(report.ICAOID, station.Code) {
+			continue
+		}
 		// Skip rows with a missing timestamp or temperature — temp is the
 		// primary signal and an observation without it is not useful.
 		if report.Temp == nil {
@@ -82,9 +97,9 @@ func buildObservationSnapshots(
 			windKMH = &v
 		}
 		snaps = append(snaps, domain.ObservationSnapshot{
-			StationCode: obsStation,
+			StationCode: station.Code,
 			ObservedAt:  observedAt,
-			Timezone:    obsTimezone,
+			Timezone:    station.Timezone,
 			TempC:       *report.Temp,
 			DewPointC:   report.Dewp,
 			WindKMH:     windKMH,

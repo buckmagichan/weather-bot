@@ -29,7 +29,7 @@ type WeatherFeatureSummary struct {
 	// variable without ingesting Polymarket prices.
 	ResolutionObservedHighC *float64 `json:"resolution_observed_high_c"` // nil if source unavailable/incomplete
 	ResolutionSourceURL     string   `json:"resolution_source_url"`
-	ResolutionSourceType    string   `json:"resolution_source_type"` // e.g. historical_observations or current_observation_fallback
+	ResolutionSourceType    string   `json:"resolution_source_type"` // historical_observations when present
 
 	// Metadata / diagnostics.
 	ForecastSnapshotFetchedAt time.Time  `json:"forecast_snapshot_fetched_at"`

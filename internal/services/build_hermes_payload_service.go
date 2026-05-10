@@ -110,6 +110,9 @@ func computeSanityFlags(s *domain.WeatherFeatureSummary) []string {
 		// Fewer than 6 hourly rows and no resolution high; limited intraday trend coverage.
 		flags = append(flags, "limited_observation_coverage")
 	}
+	if largeRemainingUpsideBeforePeak(s) {
+		flags = append(flags, "large_remaining_upside_before_peak")
+	}
 
 	return flags
 }

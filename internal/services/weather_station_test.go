@@ -12,10 +12,6 @@ func TestMarketWeatherStations(t *testing.T) {
 			Latitude:  31.1434,
 			Longitude: 121.8050,
 		},
-		"ZUCK": {
-			Latitude:  29.7192,
-			Longitude: 106.6417,
-		},
 		"ZBAA": {
 			Latitude:  40.0801,
 			Longitude: 116.5850,
@@ -23,10 +19,6 @@ func TestMarketWeatherStations(t *testing.T) {
 		"ZGGG": {
 			Latitude:  23.3924,
 			Longitude: 113.2990,
-		},
-		"ZUUU": {
-			Latitude:  30.5785,
-			Longitude: 103.9470,
 		},
 		"ZHHH": {
 			Latitude:  30.7838,
@@ -84,6 +76,13 @@ func TestMarketWeatherStations(t *testing.T) {
 		if !strings.Contains(may6URL, "may-6-2026") {
 			t.Fatalf("%s PolymarketEventURL May 6: got %q", station.Code, may6URL)
 		}
+		may8Slug, err := station.PolymarketEventSlug("2026-05-08")
+		if err != nil {
+			t.Fatalf("%s PolymarketEventSlug May 8: %v", station.Code, err)
+		}
+		if strings.Contains(may8Slug, "may-08-2026") || !strings.Contains(may8Slug, "may-8-2026") {
+			t.Fatalf("%s PolymarketEventSlug May 8 should not zero-pad day: got %q", station.Code, may8Slug)
+		}
 	}
 }
 
@@ -92,8 +91,6 @@ func TestMarketWeatherStations_TemperatureProfiles(t *testing.T) {
 		"ZBAA": TemperatureProfileNorthInland,
 		"ZSPD": TemperatureProfileCoastalFastLock,
 		"ZGGG": TemperatureProfileHumidSouth,
-		"ZUUU": TemperatureProfileBasinInland,
-		"ZUCK": TemperatureProfileBasinInland,
 		"ZHHH": TemperatureProfileBasinInland,
 		"ZSQD": TemperatureProfileCoastalFastLock,
 	}
@@ -107,7 +104,7 @@ func TestMarketWeatherStations_TemperatureProfiles(t *testing.T) {
 
 func TestMarketWeatherStations_Order(t *testing.T) {
 	stations := MarketWeatherStations()
-	want := []string{"ZBAA", "ZSPD", "ZGGG", "ZUUU", "ZUCK", "ZHHH", "ZSQD"}
+	want := []string{"ZBAA", "ZSPD", "ZGGG", "ZHHH", "ZSQD"}
 
 	if len(stations) != len(want) {
 		t.Fatalf("got %d stations, want %d", len(stations), len(want))

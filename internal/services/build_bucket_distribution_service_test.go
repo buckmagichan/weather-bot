@@ -425,6 +425,32 @@ func TestBuildBucketDistribution_Confidence(t *testing.T) {
 	}
 }
 
+func TestBuildBucketDistribution_ConfidenceDiscountsLargeEarlyUpside(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	localNoonUTC := time.Date(2026, 5, 10, 4, 0, 0, 0, time.UTC)
+
+	baseline := svc.Build(makeSummary(
+		withGeneratedAt(localNoonUTC),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withObsPoints(12),
+		withTempChange3h(1.0),
+		withRemainingForecastHigh(27.5),
+	)).Confidence
+	largeUpside := svc.Build(makeSummary(
+		withGeneratedAt(localNoonUTC),
+		withForecastHigh(30.0),
+		withObsHigh(25.0),
+		withObsPoints(12),
+		withTempChange3h(1.0),
+		withRemainingForecastHigh(29.0),
+	)).Confidence
+
+	if largeUpside >= baseline {
+		t.Fatalf("large early remaining upside should discount confidence: got %.2f baseline %.2f", largeUpside, baseline)
+	}
+}
+
 // TestBuildBucketDistribution_TrendCap ensures the ±0.5 C cap on Rule 1
 // prevents large trends from dominating the estimate.
 func TestBuildBucketDistribution_TrendCap(t *testing.T) {
@@ -439,6 +465,51 @@ func TestBuildBucketDistribution_TrendCap(t *testing.T) {
 	}
 	if dNeg.ExpectedHighC < base-0.5-1e-9 {
 		t.Errorf("negative cap: ExpectedHighC %.4f < %.4f", dNeg.ExpectedHighC, base-0.5)
+	}
+}
+
+func TestComputeSpread_TimeSeriesStressWidensUnstableInputs(t *testing.T) {
+	baseline := computeSpread(makeSummary(
+		withForecastHigh(18.0),
+		withObsHigh(18.0),
+		withTempChange3h(0.5),
+	))
+	withDrift := computeSpread(makeSummary(
+		withForecastHigh(18.0),
+		withObsHigh(18.0),
+		withTempChange3h(0.5),
+		withForecastTrend(3.0),
+	))
+	withUnderforecast := computeSpread(makeSummary(
+		withForecastHigh(18.0),
+		withObsHigh(20.0),
+		withTempChange3h(0.5),
+	))
+
+	if withDrift <= baseline {
+		t.Fatalf("large run-to-run drift should widen spread: got %.4f baseline %.4f", withDrift, baseline)
+	}
+	if withUnderforecast <= baseline {
+		t.Fatalf("observed high above forecast should widen spread: got %.4f baseline %.4f", withUnderforecast, baseline)
+	}
+}
+
+func TestComputeSpread_StableOverforecastDoesNotInflateLockedDay(t *testing.T) {
+	local15UTC := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC)
+	s := makeSummary(
+		withGeneratedAt(local15UTC),
+		withForecastHigh(28.0),
+		withObsHigh(25.0),
+		withLatestObserved(24.6),
+		withTempChange3h(0.0),
+		withObsPoints(16),
+		withRemainingForecastHigh(25.2),
+	)
+
+	got := computeSpread(s)
+	want := temperatureProfileConfigFor(s.TemperatureProfile).hardLockSigma
+	if !nearF(got, want, 1e-9) {
+		t.Fatalf("stable late overforecast should remain hard-locked: got %.4f want %.4f", got, want)
 	}
 }
 

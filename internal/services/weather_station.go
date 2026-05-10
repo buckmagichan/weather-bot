@@ -48,19 +48,26 @@ func (s WeatherStation) Label() string {
 }
 
 func (s WeatherStation) PolymarketEventURL(targetDateLocal string) (string, error) {
+	eventSlug, err := s.PolymarketEventSlug(targetDateLocal)
+	if err != nil {
+		return "", err
+	}
+	if eventSlug == "" {
+		return "", nil
+	}
+	return fmt.Sprintf("https://polymarket.com/event/%s", eventSlug), nil
+}
+
+func (s WeatherStation) PolymarketEventSlug(targetDateLocal string) (string, error) {
 	if s.PolymarketCitySlug == "" {
 		return "", nil
 	}
 	d, err := time.Parse("2006-01-02", targetDateLocal)
 	if err != nil {
-		return "", fmt.Errorf("build polymarket event URL for %s: parse date %q: %w", s.Code, targetDateLocal, err)
+		return "", fmt.Errorf("build polymarket event slug for %s: parse date %q: %w", s.Code, targetDateLocal, err)
 	}
 	dateSlug := strings.ToLower(d.Format("January-2-2006"))
-	return fmt.Sprintf(
-		"https://polymarket.com/event/highest-temperature-in-%s-on-%s",
-		s.PolymarketCitySlug,
-		dateSlug,
-	), nil
+	return fmt.Sprintf("highest-temperature-in-%s-on-%s", s.PolymarketCitySlug, dateSlug), nil
 }
 
 func DefaultWeatherStation() WeatherStation {
@@ -110,26 +117,6 @@ var marketStations = []WeatherStation{
 		TemperatureProfile:  TemperatureProfileHumidSouth,
 		ResolutionSourceURL: "https://www.wunderground.com/history/daily/cn/guangzhou/ZGGG",
 		PolymarketCitySlug:  "guangzhou",
-	},
-	{
-		Code:                "ZUUU",
-		Name:                "Chengdu Shuangliu International Airport",
-		Latitude:            30.5785,
-		Longitude:           103.9470,
-		Timezone:            chinaTimezone,
-		TemperatureProfile:  TemperatureProfileBasinInland,
-		ResolutionSourceURL: "https://www.wunderground.com/history/daily/cn/chengdu/ZUUU",
-		PolymarketCitySlug:  "chengdu",
-	},
-	{
-		Code:                "ZUCK",
-		Name:                "Chongqing Jiangbei International Airport",
-		Latitude:            29.7192,
-		Longitude:           106.6417,
-		Timezone:            chinaTimezone,
-		TemperatureProfile:  TemperatureProfileBasinInland,
-		ResolutionSourceURL: "https://www.wunderground.com/history/daily/cn/chongqing/ZUCK",
-		PolymarketCitySlug:  "chongqing",
 	},
 	{
 		Code:                "ZHHH",

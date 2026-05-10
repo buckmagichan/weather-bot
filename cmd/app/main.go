@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"github.com/buckmagichan/weather-bot/internal/hermes"
 	"github.com/buckmagichan/weather-bot/internal/providers/aviationweather"
 	"github.com/buckmagichan/weather-bot/internal/providers/openmeteo"
+	"github.com/buckmagichan/weather-bot/internal/providers/polymarket"
 	"github.com/buckmagichan/weather-bot/internal/providers/wunderground"
 	"github.com/buckmagichan/weather-bot/internal/repository"
 	"github.com/buckmagichan/weather-bot/internal/services"
@@ -56,6 +58,8 @@ func main() {
 	bridge := hermes.NewBridge()
 	analysisSvc := services.NewBuildAnalysisService(bridge)
 	analysisRepo := repository.NewAnalysisResultsRepo(pool)
+	priceClient := polymarket.NewClient()
+	priceRepo := repository.NewMarketPriceSnapshotsRepo(pool)
 	pipeline := &stationPipeline{
 		forecastClient: forecastClient,
 		forecastRepo:   forecastRepo,
@@ -67,6 +71,8 @@ func main() {
 		hermesSvc:      hermesSvc,
 		analysisSvc:    analysisSvc,
 		analysisRepo:   analysisRepo,
+		priceClient:    priceClient,
+		priceRepo:      priceRepo,
 	}
 
 	completed := 0
@@ -94,6 +100,8 @@ type stationPipeline struct {
 	hermesSvc      *services.BuildHermesPayloadService
 	analysisSvc    *services.BuildAnalysisService
 	analysisRepo   *repository.AnalysisResultsRepo
+	priceClient    *polymarket.Client
+	priceRepo      *repository.MarketPriceSnapshotsRepo
 }
 
 func (p *stationPipeline) runMarketForStation(station services.WeatherStation) error {
@@ -104,30 +112,37 @@ func (p *stationPipeline) runMarketForStation(station services.WeatherStation) e
 	today := time.Now().In(loc).Format("2006-01-02")
 
 	fmt.Printf("\n=== %s — %s ===\n", station.Label(), today)
-	marketURL, err := station.PolymarketEventURL(today)
-	if err != nil {
-		log.Printf("%s polymarket URL: %v", station.Code, err)
-	} else if marketURL != "" {
-		fmt.Printf("Polymarket:          %s\n", marketURL)
-	}
 
 	// --- Forecast ---
 	forecastSvc, err := services.NewFetchForecastServiceForStation(p.forecastClient, station)
 	if err != nil {
 		return fmt.Errorf("init forecast service: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	snap, err := forecastSvc.FetchDailySnapshot(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch forecast: %w", err)
+	var snap *domain.ForecastSnapshot
+	if err := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		var err error
+		snap, err = forecastSvc.FetchDailySnapshot(ctx)
+		if err != nil {
+			return fmt.Errorf("fetch forecast: %w", err)
+		}
+		forecastInserted, err := p.forecastRepo.Insert(ctx, snap)
+		if err != nil {
+			return fmt.Errorf("insert forecast: %w", err)
+		}
+		if forecastInserted {
+			log.Printf("%s forecast saved (%s  %.1f C)", station.Code, snap.TargetDateLocal, snap.ForecastHighC)
+		}
+		return nil
+	}(); err != nil {
+		return err
 	}
-	forecastInserted, err := p.forecastRepo.Insert(ctx, snap)
+	marketSlug, err := station.PolymarketEventSlug(snap.TargetDateLocal)
 	if err != nil {
-		return fmt.Errorf("insert forecast: %w", err)
-	}
-	if forecastInserted {
-		log.Printf("%s forecast saved (%s  %.1f C)", station.Code, snap.TargetDateLocal, snap.ForecastHighC)
+		log.Printf("%s polymarket slug: %v", station.Code, err)
+	} else if marketSlug != "" {
+		fmt.Printf("Polymarket:          https://polymarket.com/event/%s\n", marketSlug)
 	}
 
 	// --- Observations ---
@@ -137,59 +152,74 @@ func (p *stationPipeline) runMarketForStation(station services.WeatherStation) e
 	}
 	// Observation fetch gets its own budget because upstream METAR latency can
 	// be bursty and should not consume the forecast/DB time budget.
-	obsCtx, obsCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer obsCancel()
-	observations, err := obsSvc.FetchTodayObservations(obsCtx)
-	if err != nil {
-		log.Printf("%s fetch observations: %v — continuing without new observations", station.Code, err)
-		observations = nil
-	}
-	insertObsCtx, insertObsCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer insertObsCancel()
-	for i := range observations {
-		if _, err := p.obsRepo.Insert(insertObsCtx, &observations[i]); err != nil {
-			log.Printf("%s insert observation at %s: %v — continuing",
-				station.Code,
-				observations[i].ObservedAt.Format(time.RFC3339),
-				err,
-			)
+	var observations []domain.ObservationSnapshot
+	func() {
+		obsCtx, obsCancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer obsCancel()
+		var err error
+		observations, err = obsSvc.FetchTodayObservations(obsCtx)
+		if err != nil {
+			log.Printf("%s fetch observations: %v — continuing without new observations", station.Code, err)
+			observations = nil
 		}
-	}
+	}()
+	func() {
+		insertObsCtx, insertObsCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer insertObsCancel()
+		for i := range observations {
+			if _, err := p.obsRepo.Insert(insertObsCtx, &observations[i]); err != nil {
+				log.Printf("%s insert observation at %s: %v — continuing",
+					station.Code,
+					observations[i].ObservedAt.Format(time.RFC3339),
+					err,
+				)
+			}
+		}
+	}()
 
 	// --- Feature Summary ---
-	summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer summaryCancel()
-	summary, err := p.summarySvc.BuildWithStationProfile(
-		summaryCtx,
-		station.Code,
-		snap.TargetDateLocal,
-		station.Timezone,
-		station.TemperatureProfile,
-		time.Now(),
-	)
-	if err != nil {
-		return fmt.Errorf("build feature summary: %w", err)
+	var summary *domain.WeatherFeatureSummary
+	if err := func() error {
+		summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer summaryCancel()
+		var err error
+		summary, err = p.summarySvc.BuildWithStationProfile(
+			summaryCtx,
+			station.Code,
+			snap.TargetDateLocal,
+			station.Timezone,
+			station.TemperatureProfile,
+			time.Now(),
+		)
+		if err != nil {
+			return fmt.Errorf("build feature summary: %w", err)
+		}
+		return nil
+	}(); err != nil {
+		return err
 	}
 
 	// --- Resolution Observation ---
 	// Wunderground is the Polymarket settlement source. Treat it as the
 	// preferred observed high when available, but keep the pipeline alive on
 	// fetch/parsing failures and fall back to METAR-derived observations.
-	resolutionCtx, resolutionCancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer resolutionCancel()
-	resolutionObs, found, err := p.resolutionSvc.FetchDailyHigh(resolutionCtx, station, snap.TargetDateLocal)
-	if err != nil {
-		log.Printf("%s fetch resolution high: %v — falling back to METAR high", station.Code, err)
-	} else if found {
-		services.ApplyResolutionObservedHigh(summary, resolutionObs)
-		log.Printf(
-			"%s resolution high from Wunderground [%s] (%s  %d C)",
-			station.Code,
-			resolutionObs.SourceType,
-			snap.TargetDateLocal,
-			resolutionObs.HighC,
-		)
-	}
+	func() {
+		resolutionCtx, resolutionCancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer resolutionCancel()
+		resolutionObs, found, err := p.resolutionSvc.FetchDailyHigh(resolutionCtx, station, snap.TargetDateLocal)
+		if err != nil {
+			log.Printf("%s fetch resolution high: %v — falling back to METAR high", station.Code, err)
+		} else if found {
+			services.ApplyResolutionObservedHigh(summary, resolutionObs)
+			log.Printf(
+				"%s resolution high from Wunderground [%s] (%s  %d C)",
+				station.Code,
+				resolutionObs.SourceType,
+				snap.TargetDateLocal,
+				resolutionObs.HighC,
+			)
+		}
+	}()
 
 	// --- Bucket Distribution ---
 	dist := p.bucketSvc.Build(summary)
@@ -202,11 +232,16 @@ func (p *stationPipeline) runMarketForStation(station services.WeatherStation) e
 
 	// --- Hermes Analysis ---
 	// Use a dedicated context: LLM inference takes longer than the DB budget.
-	hermesCtx, hermesCancel := context.WithTimeout(context.Background(), buildHermesTimeout())
-	defer hermesCancel()
-	analysis, analysisSource, err := p.analysisSvc.BuildWithFallback(hermesCtx, summary, dist)
-	if err != nil {
-		log.Printf("%s hermes analysis: %v — skipping", station.Code, err)
+	var analysis *domain.AnalysisResult
+	var analysisSource services.AnalysisSource
+	var hermesErr error
+	func() {
+		hermesCtx, hermesCancel := context.WithTimeout(context.Background(), buildHermesTimeout())
+		defer hermesCancel()
+		analysis, analysisSource, hermesErr = p.analysisSvc.BuildWithFallback(hermesCtx, summary, dist)
+	}()
+	if hermesErr != nil {
+		log.Printf("%s hermes analysis: %v — skipping", station.Code, hermesErr)
 		return nil
 	}
 	if analysisSource == services.AnalysisSourceLocalFallback {
@@ -253,10 +288,14 @@ func (p *stationPipeline) runMarketForStation(station services.WeatherStation) e
 		Distribution:      dist,
 		HermesPayloadJSON: json.RawMessage(payloadBytes),
 	}
-	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer persistCancel()
-	analysisInserted, err := p.analysisRepo.Insert(persistCtx, rec)
-	if err != nil {
+	var analysisInserted bool
+	if err := func() error {
+		persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer persistCancel()
+		var err error
+		analysisInserted, err = p.analysisRepo.Insert(persistCtx, rec)
+		return err
+	}(); err != nil {
 		log.Printf("%s persist analysis: %v — skipping", station.Code, err)
 		return nil
 	}
@@ -265,7 +304,85 @@ func (p *stationPipeline) runMarketForStation(station services.WeatherStation) e
 	} else {
 		fmt.Println("Analysis:            already in postgres (duplicate)")
 	}
+
+	// --- Persist Polymarket Prices ---
+	if marketSlug != "" {
+		var priceSnapshots []domain.MarketPriceSnapshot
+		var priceFetchErr error
+		func() {
+			priceFetchCtx, priceFetchCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer priceFetchCancel()
+			capturedAt := time.Now()
+			// CapturedAt is the market quote time. The copied weather/model fields
+			// below are the same-run state generated just before Hermes analysis.
+			priceSnapshots, priceFetchErr = p.priceClient.FetchEventPriceSnapshots(
+				priceFetchCtx,
+				station.Code,
+				snap.TargetDateLocal,
+				marketSlug,
+				capturedAt,
+			)
+		}()
+		if errors.Is(priceFetchErr, polymarket.ErrEventNotFound) {
+			fmt.Println("Market prices:       no Polymarket event found")
+		} else if priceFetchErr != nil {
+			log.Printf("%s fetch polymarket prices: %v — skipping", station.Code, priceFetchErr)
+		} else if len(priceSnapshots) > 0 {
+			decorateMarketPriceSnapshots(priceSnapshots, summary, dist, analysis)
+			var inserted int
+			var pricePersistErr error
+			func() {
+				pricePersistCtx, pricePersistCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer pricePersistCancel()
+				inserted, pricePersistErr = p.priceRepo.InsertMany(pricePersistCtx, priceSnapshots)
+			}()
+			if pricePersistErr != nil {
+				log.Printf("%s persist polymarket prices: %v — skipping", station.Code, pricePersistErr)
+			} else {
+				fmt.Printf("Market prices:       saved %d bucket snapshots\n", inserted)
+			}
+		} else {
+			fmt.Println("Market prices:       no Polymarket event found")
+		}
+	}
 	return nil
+}
+
+func decorateMarketPriceSnapshots(
+	snapshots []domain.MarketPriceSnapshot,
+	summary *domain.WeatherFeatureSummary,
+	dist *domain.TemperatureBucketDistribution,
+	analysis *domain.AnalysisResult,
+) {
+	if len(snapshots) == 0 || summary == nil || dist == nil || analysis == nil {
+		return
+	}
+
+	analysisConfidence := analysis.Confidence
+	distConfidence := dist.Confidence
+	expectedHigh := dist.ExpectedHighC
+	latestForecastHigh := summary.LatestForecastHighC
+	probabilityResolver := services.NewPolymarketBucketProbabilityResolver(dist)
+
+	for i := range snapshots {
+		snapshots[i].PredictedBestBucket = analysis.PredictedBestBucket
+		if analysis.SecondaryRiskBucket != nil {
+			secondary := *analysis.SecondaryRiskBucket
+			snapshots[i].SecondaryRiskBucket = &secondary
+		}
+		snapshots[i].AnalysisConfidence = &analysisConfidence
+		if prob, ok := probabilityResolver.Probability(snapshots[i].BucketLabel); ok {
+			snapshots[i].ModelBucketProbability = &prob
+		}
+		snapshots[i].DistributionConfidence = &distConfidence
+		snapshots[i].ExpectedHighC = &expectedHigh
+		snapshots[i].ObservedHighSoFarC = summary.ObservedHighSoFarC
+		snapshots[i].LatestObservedTempC = summary.LatestObservedTempC
+		snapshots[i].LatestForecastHighC = &latestForecastHigh
+		snapshots[i].RemainingForecastHighC = summary.RemainingForecastHighC
+		snapshots[i].TempChangeLast3hC = summary.TempChangeLast3hC
+		snapshots[i].ObservationPoints = summary.ObservationPoints
+	}
 }
 
 func buildHermesTimeout() time.Duration {

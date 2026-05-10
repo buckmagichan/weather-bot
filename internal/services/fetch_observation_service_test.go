@@ -146,14 +146,14 @@ func TestFetchTodayObservations_UsesConfiguredStation(t *testing.T) {
 	client := &fakeMETARObservationClient{
 		reports: []aviationweather.METARReport{
 			{ICAOID: "ZSPD", ReportTime: "2026-04-18T12:00:00.000Z", Temp: floatPtr(15)},
-			{ICAOID: "ZUCK", ReportTime: "2026-04-18T12:30:00.000Z", Temp: floatPtr(24)},
+			{ICAOID: "ZBAA", ReportTime: "2026-04-18T12:30:00.000Z", Temp: floatPtr(24)},
 		},
 	}
 	now := func() time.Time {
 		return time.Date(2026, 4, 18, 21, 0, 0, 0, time.FixedZone("CST", 8*3600))
 	}
 	svc, err := NewBuildableFetchObservationServiceForStation(client, WeatherStation{
-		Code:     "ZUCK",
+		Code:     "ZBAA",
 		Timezone: chinaTimezone,
 	}, now)
 	if err != nil {
@@ -164,14 +164,14 @@ func TestFetchTodayObservations_UsesConfiguredStation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchTodayObservations: %v", err)
 	}
-	if got := client.lastParams.IDs; len(got) != 1 || got[0] != "ZUCK" {
-		t.Fatalf("METAR IDs: got %v, want [ZUCK]", got)
+	if got := client.lastParams.IDs; len(got) != 1 || got[0] != "ZBAA" {
+		t.Fatalf("METAR IDs: got %v, want [ZBAA]", got)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	if rows[0].StationCode != "ZUCK" {
-		t.Fatalf("StationCode: got %q, want ZUCK", rows[0].StationCode)
+	if rows[0].StationCode != "ZBAA" {
+		t.Fatalf("StationCode: got %q, want ZBAA", rows[0].StationCode)
 	}
 	if rows[0].TempC != 24 {
 		t.Fatalf("TempC: got %.1f, want 24", rows[0].TempC)

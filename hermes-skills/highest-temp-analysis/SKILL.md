@@ -30,18 +30,18 @@ Your job is to:
 The observation data in the payload may come from METAR reports rather than
 hourly model/interpolated data. That means:
 - `station_code` may be any configured market airport, currently one of:
-  `ZBAA`, `ZSPD`, `ZGGG`, `ZUUU`, `ZUCK`, `ZHHH`, `ZSQD`
+  `ZBAA`, `ZSPD`, `ZGGG`, `ZHHH`, `ZSQD`
 - `timezone` is the station-local IANA timezone used by the deterministic
   model's late-day calibration
 - `temperature_profile` identifies the station's city-aware calibration profile:
   `coastal_fast_lock`, `humid_south`, `north_inland`, or `basin_inland`
 - `observation_points` may be greater than 24 for the same local date
 - `latest_observation_at` may land on `:00` or `:30`
-- `resolution_observed_high_c`, when present, is a Wunderground-derived
-  whole-degree daily high aligned to the market resolution source
+- `resolution_observed_high_c`, when present, is a Wunderground historical
+  observations whole-degree daily high aligned to the market resolution source
 - `resolution_source_type` explains which Wunderground payload supplied the
-  high. `historical_observations` is preferred; `current_observation_fallback`
-  and `page_fallback` are useful but less settlement-aligned.
+  high. The Go pipeline only forwards `historical_observations` as a
+  settlement-aligned high; current/page fallbacks are ignored upstream.
 - `remaining_forecast_high_c`, when present, is the latest model's highest
   hourly temperature after the latest observation
 - `bucket_probs` normally contains the full one-degree range from
@@ -181,6 +181,10 @@ Your entire response MUST be exactly this JSON object and nothing else:
 - Treat `sanity_flags` as operational warnings, not automatic overrides. A flag
   should influence confidence, reasons, and check timing, but it should not
   force a bucket choice that contradicts stronger evidence.
+- If `large_remaining_upside_before_peak` is present, explicitly mention that
+  the prediction still depends on meaningful additional warming before the
+  afternoon peak; prefer a shorter `next_check_in_minutes` unless the bucket is
+  already settlement-locked.
 
 ### Practical heuristics
 

@@ -49,6 +49,9 @@ func (s *FetchResolutionObservationService) FetchDailyHigh(
 	if !ok {
 		return ResolutionObservation{}, false, nil
 	}
+	if result.SourceType != wunderground.SourceTypeHistoricalObservations {
+		return ResolutionObservation{}, false, nil
+	}
 	return ResolutionObservation{
 		StationCode:     station.Code,
 		TargetDateLocal: targetDateLocal,
@@ -60,9 +63,11 @@ func (s *FetchResolutionObservationService) FetchDailyHigh(
 }
 
 // ApplyResolutionObservedHigh folds a settlement-source high into the summary.
-// The resolution high is recorded separately and becomes ObservedHighSoFarC
-// because it is the preferred settlement-aligned source. METAR remains the
-// fallback when Wunderground is unavailable or incomplete.
+// The resolution high is recorded separately. Intraday, it can only raise the
+// observed floor so a lagging Wunderground page cannot erase a higher METAR
+// observation. After the late-evening lock hour, historical Wunderground is
+// allowed to replace the METAR floor because it is the settlement-aligned
+// source Polymarket is expected to use.
 func ApplyResolutionObservedHigh(summary *domain.WeatherFeatureSummary, obs ResolutionObservation) {
 	if summary == nil {
 		panic("ApplyResolutionObservedHigh: summary must not be nil")
@@ -71,7 +76,9 @@ func ApplyResolutionObservedHigh(summary *domain.WeatherFeatureSummary, obs Reso
 	summary.ResolutionObservedHighC = &high
 	summary.ResolutionSourceURL = obs.SourceURL
 	summary.ResolutionSourceType = obs.SourceType
-	summary.ObservedHighSoFarC = &high
+	if summary.ObservedHighSoFarC == nil || stationLocalHour(summary) >= lateEveningLockHour || high > *summary.ObservedHighSoFarC {
+		summary.ObservedHighSoFarC = &high
+	}
 }
 
 func resolutionSourceURL(baseURL, targetDateLocal string) string {

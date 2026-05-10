@@ -15,8 +15,9 @@ import (
 type BuildBucketDistributionService struct{}
 
 const (
-	bucketFloorC   = -20
-	bucketCeilingC = 50
+	bucketFloorC          = -20
+	bucketCeilingC        = 50
+	peakWarmingCutoffHour = 13.5
 )
 
 type temperatureProfileConfig struct {
@@ -116,46 +117,21 @@ func (s *BuildBucketDistributionService) Build(
 	}
 }
 
-// adjustedHigh refines the forecast high using forecast trend, observed high,
-// recent momentum, station-local time, and remaining model upside. The weights
-// and caps are first-pass values — tune after backtesting.
+// adjustedHigh refines the forecast high using time-series style residual
+// corrections, recent momentum, station-local time, and remaining model upside.
+// The residual pieces are a deterministic fallback for the tsEMOS idea: without
+// ensemble spread or enough training history, we use run-to-run forecast drift
+// and observed-vs-forecast error as conservative proxies.
 func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 	adj := s.LatestForecastHighC
 	observedHigh := effectiveObservedHigh(s)
 	localHour := stationLocalHour(s)
 	profile := temperatureProfileConfigFor(s.TemperatureProfile)
 
-	// Rule 1: Forecast trend.
-	// If the forecast has been drifting up or down between model runs, carry
-	// 25% of that drift forward. This is capped at ±0.5 C so a single large
-	// revision doesn't dominate the estimate.
-	if s.ForecastTrendC != nil {
-		delta := clamp(*s.ForecastTrendC*0.25, -0.5, 0.5)
-		adj += delta
-	}
+	adj += forecastDriftCorrection(s)
+	adj += observedForecastResidualCorrection(s, observedHigh, localHour, profile)
 
-	// Rule 2: Observed high vs forecast.
-	// When reality has already met or exceeded the model, revise the expected
-	// high upward (30% of the gap). When observations are significantly below
-	// the forecast (> 2 C gap), apply a downward revision that strengthens in
-	// the afternoon because stale model highs become less credible late in the day.
-	if observedHigh != nil {
-		gap := *observedHigh - s.LatestForecastHighC
-		if gap >= 0 {
-			adj += gap * 0.30
-		} else if gap < -2.0 {
-			weight := 0.15
-			if isSoftLocked(localHour, profile) {
-				weight = 0.35
-			}
-			if isSoftLocked(localHour, profile) && stableOrCooling(s, *observedHigh) {
-				weight = profile.overshootAdjustmentWeight
-			}
-			adj += gap * weight // gap is negative, so this subtracts
-		}
-	}
-
-	// Rule 3: Recent 3-hour momentum.
+	// Recent 3-hour momentum.
 	// Only acts on strong signals (> 1 C change over the last 3 hours). Strong
 	// late-day warming is allowed to keep adjacent warmer buckets live; cooling
 	// modestly pulls back model optimism.
@@ -198,9 +174,44 @@ func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 	return adj
 }
 
+func forecastDriftCorrection(s *domain.WeatherFeatureSummary) float64 {
+	if s.ForecastTrendC == nil {
+		return 0
+	}
+	return clamp(*s.ForecastTrendC*0.25, -0.5, 0.5)
+}
+
+func observedForecastResidualCorrection(
+	s *domain.WeatherFeatureSummary,
+	observedHigh *float64,
+	localHour float64,
+	profile temperatureProfileConfig,
+) float64 {
+	if observedHigh == nil {
+		return 0
+	}
+	gap := *observedHigh - s.LatestForecastHighC
+	if gap >= 0 {
+		return gap * 0.30
+	}
+	if gap >= -2.0 {
+		return 0
+	}
+
+	weight := 0.15
+	if isSoftLocked(localHour, profile) {
+		weight = 0.35
+	}
+	if isSoftLocked(localHour, profile) && stableOrCooling(s, *observedHigh) {
+		weight = profile.overshootAdjustmentWeight
+	}
+	return gap * weight
+}
+
 // computeSpread returns the Gaussian σ (°C) used to spread the point estimate
 // into a probability distribution. More data → narrower spread → sharper probs.
-// These values are first-pass — tune after backtesting.
+// Run-to-run forecast drift and same-day residual stress widen the spread, a
+// deterministic analogue of tsEMOS' time-varying scale parameter.
 func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 	observedHigh := effectiveObservedHigh(s)
 	hasObs := observedHigh != nil
@@ -208,24 +219,58 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 	localHour := stationLocalHour(s)
 	profile := temperatureProfileConfigFor(s.TemperatureProfile)
 
+	var base float64
 	switch {
 	case hasObs && historicalResolutionLocked(s, *observedHigh):
 		return profile.hardLockSigma
 	case hasObs && isHardLocked(localHour, profile) && stableOrCooling(s, *observedHigh) && remainingForecastDoesNotExceedObserved(s, *observedHigh):
-		return profile.hardLockSigma
+		base = profile.hardLockSigma
 	case hasObs && isSoftLocked(localHour, profile) && stableOrCooling(s, *observedHigh) && strongObservationCoverage(s):
-		return profile.stableSigma
+		base = profile.stableSigma
 	case hasObs && isSoftLocked(localHour, profile) && !strongRecentWarming(s) && s.LatestForecastHighC-*observedHigh >= 2.0:
-		return 0.45
+		base = 0.45
 	case hasObs && strongRecentWarming(s):
-		return 0.80
+		base = 0.80
 	case hasObs && has3hTrend:
-		return 0.75 // confident: ground truth + recent trend
+		base = 0.75 // confident: ground truth + recent trend
 	case hasObs:
-		return 0.90 // moderate: ground truth, but no recent trend
+		base = 0.90 // moderate: ground truth, but no recent trend
 	default:
-		return 1.20 // uncertain: forecast only, no observations
+		base = 1.20 // uncertain: forecast only, no observations
 	}
+	return spreadWithTimeSeriesStress(s, observedHigh, base)
+}
+
+func spreadWithTimeSeriesStress(
+	s *domain.WeatherFeatureSummary,
+	observedHigh *float64,
+	base float64,
+) float64 {
+	inflation := 0.0
+
+	if s.ForecastTrendC != nil {
+		absTrend := math.Abs(*s.ForecastTrendC)
+		if absTrend > 0.75 {
+			inflation += clamp((absTrend-0.75)*0.15, 0, 0.35)
+		}
+	}
+
+	if observedHigh != nil {
+		residual := *observedHigh - s.LatestForecastHighC
+		shouldInflateResidual := residual > 0 || !stableOrCooling(s, *observedHigh)
+		if shouldInflateResidual {
+			absResidual := math.Abs(residual)
+			if absResidual > 1.0 {
+				inflation += clamp((absResidual-1.0)*0.12, 0, 0.40)
+			}
+		}
+	}
+
+	if s.TempChangeLast3hC != nil && *s.TempChangeLast3hC >= 1.5 {
+		inflation += clamp((*s.TempChangeLast3hC-1.5)*0.10, 0.05, 0.25)
+	}
+
+	return clamp(base+inflation, 0.20, 1.60)
 }
 
 func effectiveObservedHigh(s *domain.WeatherFeatureSummary) *float64 {
@@ -257,7 +302,10 @@ func stationLocalHour(s *domain.WeatherFeatureSummary) float64 {
 	}
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
-		panic(fmt.Sprintf("BuildBucketDistributionService: load timezone %q: %v", timezone, err))
+		loc, err = time.LoadLocation(summarySvcTimezone)
+		if err != nil {
+			panic(fmt.Sprintf("BuildBucketDistributionService: load fallback timezone %q: %v", summarySvcTimezone, err))
+		}
 	}
 	local := s.GeneratedAt.In(loc)
 	return float64(local.Hour()) + float64(local.Minute())/60.0
@@ -280,6 +328,17 @@ func strongObservationCoverage(s *domain.WeatherFeatureSummary) bool {
 
 func remainingForecastDoesNotExceedObserved(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
 	return s.RemainingForecastHighC != nil && *s.RemainingForecastHighC <= observedHigh+0.5
+}
+
+func largeRemainingUpsideBeforePeak(s *domain.WeatherFeatureSummary) bool {
+	observedHigh := effectiveObservedHigh(s)
+	if observedHigh == nil || s.RemainingForecastHighC == nil {
+		return false
+	}
+	if stationLocalHour(s) >= peakWarmingCutoffHour {
+		return false
+	}
+	return *s.RemainingForecastHighC-*observedHigh >= 3.0
 }
 
 func historicalResolutionLocked(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
@@ -449,6 +508,9 @@ func computeConfidence(s *domain.WeatherFeatureSummary) float64 {
 	}
 	if s.TempChangeLast3hC != nil {
 		conf += 0.10 // recent warming/cooling trend available
+	}
+	if largeRemainingUpsideBeforePeak(s) {
+		conf -= 0.10
 	}
 
 	return clamp(conf, 0, 1)

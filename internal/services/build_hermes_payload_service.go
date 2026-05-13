@@ -113,6 +113,9 @@ func computeSanityFlags(s *domain.WeatherFeatureSummary) []string {
 	if largeRemainingUpsideBeforePeak(s) {
 		flags = append(flags, "large_remaining_upside_before_peak")
 	}
+	if observedHigh := effectiveObservedHigh(s); observedHigh != nil && lateDayUnderforecastTailRisk(s, *observedHigh) {
+		flags = append(flags, "late_day_underforecast_tail_guard")
+	}
 
 	return flags
 }

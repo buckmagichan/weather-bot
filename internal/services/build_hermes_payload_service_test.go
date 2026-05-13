@@ -382,6 +382,27 @@ func TestBuildHermesPayload(t *testing.T) {
 			t.Errorf("SanityFlags: want large_remaining_upside_before_peak, got %v", payload.SanityFlags)
 		}
 	})
+
+	t.Run("sanity_flags_late_day_underforecast_tail_guard", func(t *testing.T) {
+		s := cleanSummary("ZBAA", "2026-05-11")
+		observedHigh := 31.0
+		latestObserved := 31.0
+		change3h := 1.0
+		s.GeneratedAt = time.Date(2026, 5, 11, 7, 10, 0, 0, time.UTC) // 15:10 local
+		s.LatestForecastHighC = 29.3
+		s.ObservedHighSoFarC = &observedHigh
+		s.LatestObservedTempC = &latestObserved
+		s.TempChangeLast3hC = &change3h
+		s.ObservationPoints = 18
+
+		payload, err := svc.Build(s, testDist("ZBAA", "2026-05-11"))
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if !containsFlag(payload.SanityFlags, "late_day_underforecast_tail_guard") {
+			t.Errorf("SanityFlags: want late_day_underforecast_tail_guard, got %v", payload.SanityFlags)
+		}
+	})
 }
 
 // containsFlag reports whether flag appears in flags.

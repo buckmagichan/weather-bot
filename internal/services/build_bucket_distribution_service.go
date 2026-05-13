@@ -18,6 +18,7 @@ const (
 	bucketFloorC          = -20
 	bucketCeilingC        = 50
 	peakWarmingCutoffHour = 13.5
+	lateDayTailGuardHour  = 14.5
 )
 
 type temperatureProfileConfig struct {
@@ -146,6 +147,9 @@ func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 
 	if observedHigh != nil {
 		obs := *observedHigh
+		if lateDayUnderforecastTailRisk(s, obs) {
+			adj = math.Min(adj, obs+0.05)
+		}
 		if strongRecentWarming(s) && localHour < profile.strongWarmingUntilHour {
 			adj = math.Max(adj, obs+profile.strongWarmingUpsideC)
 		}
@@ -222,6 +226,8 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 	var base float64
 	switch {
 	case hasObs && historicalResolutionLocked(s, *observedHigh):
+		return profile.hardLockSigma
+	case hasObs && lateDayUnderforecastTailRisk(s, *observedHigh):
 		return profile.hardLockSigma
 	case hasObs && isHardLocked(localHour, profile) && stableOrCooling(s, *observedHigh) && remainingForecastDoesNotExceedObserved(s, *observedHigh):
 		base = profile.hardLockSigma
@@ -339,6 +345,19 @@ func largeRemainingUpsideBeforePeak(s *domain.WeatherFeatureSummary) bool {
 		return false
 	}
 	return *s.RemainingForecastHighC-*observedHigh >= 3.0
+}
+
+func lateDayUnderforecastTailRisk(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
+	if stationLocalHour(s) < lateDayTailGuardHour {
+		return false
+	}
+	if s.LatestForecastHighC > observedHigh-1.0 {
+		return false
+	}
+	if strongRecentWarming(s) {
+		return false
+	}
+	return true
 }
 
 func historicalResolutionLocked(s *domain.WeatherFeatureSummary, observedHigh float64) bool {

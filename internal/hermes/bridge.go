@@ -16,9 +16,14 @@ const defaultHermesBin = "hermes"
 const hermesSkill = "highest-temp-analysis"
 
 var ErrRateLimited = errors.New("hermes rate limited")
+var ErrUnavailable = errors.New("hermes unavailable")
 
 func IsRateLimited(err error) bool {
 	return errors.Is(err, ErrRateLimited)
+}
+
+func IsUnavailable(err error) bool {
+	return errors.Is(err, ErrUnavailable)
 }
 
 // Bridge calls the Hermes CLI to produce an AnalysisResult from a HermesAnalysisPayload.
@@ -75,6 +80,9 @@ func parseOutput(raw []byte) (*domain.AnalysisResult, error) {
 	if looksRateLimited(raw) {
 		return nil, ErrRateLimited
 	}
+	if looksUnavailable(raw) {
+		return nil, ErrUnavailable
+	}
 	result, extracted, err := extractLastAnalysisResult(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse hermes output: %w\nraw output:\n%s", err, string(raw))
@@ -90,6 +98,14 @@ func looksRateLimited(raw []byte) bool {
 	return bytes.Contains(lower, []byte("http 429")) ||
 		bytes.Contains(lower, []byte("rate_limit_reached_error")) ||
 		bytes.Contains(lower, []byte("rate limited"))
+}
+
+func looksUnavailable(raw []byte) bool {
+	lower := bytes.ToLower(raw)
+	return bytes.Contains(lower, []byte("failed to initialize agent")) ||
+		(bytes.Contains(lower, []byte("context window")) &&
+			bytes.Contains(lower, []byte("below the minimum"))) ||
+		bytes.Contains(lower, []byte("choose a model with at least"))
 }
 
 // extractLastJSONObject locates the last complete top-level JSON object in raw.
@@ -155,6 +171,8 @@ var normalizedRiskFlags = map[string]string{
 	normalizeToken("missing_previous_forecast"):             "missing_previous_forecast",
 	normalizeToken("no_observation_data"):                   "no_observation_data",
 	normalizeToken("limited_observation_coverage"):          "limited_observation_coverage",
+	normalizeToken("large_remaining_upside_before_peak"):    "large_remaining_upside_before_peak",
+	normalizeToken("late_day_underforecast_tail_guard"):     "late_day_underforecast_tail_guard",
 }
 
 // extractLastAnalysisResult scans JSON objects from the end of the Hermes

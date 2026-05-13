@@ -71,6 +71,58 @@ EOF
 	}
 }
 
+func TestBuildAnalysisService_FallsBackOnHermesUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "hermes-unavailable")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+cat <<'EOF'
+Query: Use the highest-temp-analysis skill.
+{"station_code":"ZSPD","target_date_local":"2026-05-12"}
+Initializing agent...
+Failed to initialize agent: Model kimi-k2.6 has a context window of 32,768 tokens, which is below the minimum 64,000 required by Hermes Agent.
+Choose a model with at least 64K context, or set model.context_length in config.yaml to override.
+EOF
+`), 0o755); err != nil {
+		t.Fatalf("write fake hermes: %v", err)
+	}
+
+	svc := NewBuildAnalysisService(hermes.NewBridgeWithBin(script))
+	obsHigh := 28.0
+	change := -1.0
+	summary := &domain.WeatherFeatureSummary{
+		StationCode:         "ZSPD",
+		TargetDateLocal:     "2026-05-12",
+		Timezone:            "Asia/Shanghai",
+		GeneratedAt:         time.Date(2026, 5, 12, 6, 50, 0, 0, time.UTC),
+		LatestForecastHighC: 28.4,
+		ObservedHighSoFarC:  &obsHigh,
+		TempChangeLast3hC:   &change,
+		ObservationPoints:   47,
+		HourlyPoints:        24,
+	}
+	dist := &domain.TemperatureBucketDistribution{
+		StationCode:     "ZSPD",
+		TargetDateLocal: "2026-05-12",
+		ExpectedHighC:   28,
+		Confidence:      0.9,
+		BucketProbs: []domain.BucketProbability{
+			{Label: "28C", Prob: 0.977},
+			{Label: "29C", Prob: 0.023},
+		},
+	}
+
+	analysis, source, err := svc.BuildWithFallback(context.Background(), summary, dist)
+	if err != nil {
+		t.Fatalf("BuildWithFallback: %v", err)
+	}
+	if source != AnalysisSourceLocalFallback {
+		t.Fatalf("source: got %q, want %q", source, AnalysisSourceLocalFallback)
+	}
+	if analysis.PredictedBestBucket != "28C" {
+		t.Errorf("PredictedBestBucket: got %q, want 28C", analysis.PredictedBestBucket)
+	}
+}
+
 func TestBuildLocalAnalysis_EveningHistoricalLockUsesLongerNextCheck(t *testing.T) {
 	resolutionHigh := 21.0
 	latestObsAt := time.Date(2026, 5, 5, 21, 40, 0, 0, time.FixedZone("CST", 8*60*60))

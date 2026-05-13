@@ -55,7 +55,7 @@ func (s *BuildAnalysisService) BuildWithFallback(
 	}
 	result, err := s.bridge.Analyze(ctx, payload)
 	if err != nil {
-		if hermes.IsRateLimited(err) || ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+		if hermes.IsRateLimited(err) || hermes.IsUnavailable(err) || ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			return buildLocalAnalysis(payload), AnalysisSourceLocalFallback, nil
 		}
 		return nil, "", fmt.Errorf("build analysis: call hermes: %w", err)

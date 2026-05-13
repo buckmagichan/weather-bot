@@ -200,6 +200,19 @@ func TestParseOutput_rateLimitReturnsSentinelError(t *testing.T) {
 	}
 }
 
+func TestParseOutput_unavailableReturnsSentinelError(t *testing.T) {
+	raw := []byte(`Query: Use the highest-temp-analysis skill.
+{"station_code":"ZBAA","target_date_local":"2026-05-12"}
+Initializing agent...
+Failed to initialize agent: Model kimi-k2.6 has a context window of 32,768 tokens, which is below the minimum 64,000 required by Hermes Agent.
+Choose a model with at least 64K context, or set model.context_length in config.yaml to override.`)
+
+	_, err := parseOutput(raw)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("parseOutput error: got %v, want ErrUnavailable", err)
+	}
+}
+
 func TestParseOutput_ignores_trailing_unrelated_json(t *testing.T) {
 	raw := []byte(validResult + "\n" + `{"debug":"trailing metadata"}`)
 	result, err := parseOutput(raw)

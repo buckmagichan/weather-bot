@@ -1,7 +1,7 @@
 ---
 name: highest-temp-analysis
 description: Explain a structured daily highest-temperature bucket forecast for an airport station and return JSON analysis.
-version: 1.4.3
+version: 1.4.4
 author: wanghan
 license: MIT
 ---
@@ -185,6 +185,9 @@ Your entire response MUST be exactly this JSON object and nothing else:
   the prediction still depends on meaningful additional warming before the
   afternoon peak; prefer a shorter `next_check_in_minutes` unless the bucket is
   already settlement-locked.
+- If `late_day_underforecast_tail_guard` is present, treat warmer adjacent
+  buckets as guarded tail risk rather than normal live upside unless their
+  supplied probability is still meaningfully high.
 
 ### Practical heuristics
 

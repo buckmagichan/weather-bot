@@ -618,6 +618,57 @@ func TestBuildBucketDistribution_AfternoonObservedHighFarBelowForecastLowersExpe
 	}
 }
 
+func TestBuildBucketDistribution_LateDayUnderforecastSuppressesWarmerTail(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1510UTC := time.Date(2026, 5, 11, 7, 10, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local1510UTC),
+		withForecastHigh(29.3),
+		withObsHigh(31.0),
+		withLatestObserved(31.0),
+		withTempChange3h(1.0),
+		withObsPoints(18),
+		withRemainingForecastHigh(29.4),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC > 31.1 {
+		t.Errorf("late underforecast guard should keep ExpectedHighC near observed high: got %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "31C"); got < 0.90 {
+		t.Errorf("31C should dominate once late underforecast guard is active, got %.4f", got)
+	}
+	if got := findProb(d.BucketProbs, "32C"); got > 0.08 {
+		t.Errorf("32C warmer-tail probability should be suppressed, got %.4f", got)
+	}
+}
+
+func TestBuildBucketDistribution_StrongLateWarmingBypassesUnderforecastGuard(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1510UTC := time.Date(2026, 5, 11, 7, 10, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local1510UTC),
+		withForecastHigh(29.3),
+		withObsHigh(31.0),
+		withLatestObserved(31.0),
+		withTempChange3h(2.2),
+		withObsPoints(18),
+		withRemainingForecastHigh(32.0),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC < 31.5 {
+		t.Errorf("strong late warming should keep upside alive, got ExpectedHighC %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "32C"); got < 0.20 {
+		t.Errorf("32C should remain meaningful during strong late warming, got %.4f", got)
+	}
+}
+
 func TestBuildBucketDistribution_UsesSummaryTimezoneForLateDayRules(t *testing.T) {
 	svc := NewBuildBucketDistributionService()
 	utcMorningInNewYork := time.Date(2026, 5, 5, 7, 0, 0, 0, time.UTC) // 03:00 New York, 15:00 Shanghai

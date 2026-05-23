@@ -783,6 +783,34 @@ func TestBuildBucketDistribution_CoastalProfileHardLocksAfter1415(t *testing.T) 
 	}
 }
 
+func TestBuildBucketDistribution_CoastalAfternoonForecastOverreach(t *testing.T) {
+	svc := NewBuildBucketDistributionService()
+	local1431UTC := time.Date(2026, 5, 21, 6, 31, 0, 0, time.UTC)
+
+	d := svc.Build(makeSummary(
+		withGeneratedAt(local1431UTC),
+		withTemperatureProfile(TemperatureProfileCoastalFastLock),
+		withForecastHigh(26.8),
+		withObsHigh(25.0),
+		withLatestObserved(24.0),
+		withTempChange3h(-1.0),
+		withObsPoints(30),
+		withRemainingForecastHigh(26.5),
+	))
+
+	assertValidDistribution(t, d)
+
+	if d.ExpectedHighC > 25.25 {
+		t.Errorf("coastal afternoon overreach should pull ExpectedHighC near observed high, got %.4f", d.ExpectedHighC)
+	}
+	if got := findProb(d.BucketProbs, "25C"); got < 0.85 {
+		t.Errorf("25C should dominate after coastal afternoon overreach guard, got %.4f", got)
+	}
+	if got := findProb(d.BucketProbs, "27C"); got > 0.02 {
+		t.Errorf("27C should be suppressed for the Shanghai 2026-05-21 pattern, got %.4f", got)
+	}
+}
+
 func TestBuildBucketDistribution_BasinProfileKeepsWarmingUpsideAt1415(t *testing.T) {
 	svc := NewBuildBucketDistributionService()
 	local1415UTC := time.Date(2026, 5, 5, 6, 15, 0, 0, time.UTC)

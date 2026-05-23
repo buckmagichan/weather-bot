@@ -173,6 +173,7 @@ var normalizedRiskFlags = map[string]string{
 	normalizeToken("limited_observation_coverage"):          "limited_observation_coverage",
 	normalizeToken("large_remaining_upside_before_peak"):    "large_remaining_upside_before_peak",
 	normalizeToken("late_day_underforecast_tail_guard"):     "late_day_underforecast_tail_guard",
+	normalizeToken("coastal_afternoon_forecast_overreach"):  "coastal_afternoon_forecast_overreach",
 }
 
 // extractLastAnalysisResult scans JSON objects from the end of the Hermes

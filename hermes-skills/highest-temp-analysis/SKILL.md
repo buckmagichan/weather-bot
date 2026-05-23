@@ -1,7 +1,7 @@
 ---
 name: highest-temp-analysis
 description: Explain a structured daily highest-temperature bucket forecast for an airport station and return JSON analysis.
-version: 1.4.4
+version: 1.4.5
 author: wanghan
 license: MIT
 ---
@@ -188,6 +188,10 @@ Your entire response MUST be exactly this JSON object and nothing else:
 - If `late_day_underforecast_tail_guard` is present, treat warmer adjacent
   buckets as guarded tail risk rather than normal live upside unless their
   supplied probability is still meaningfully high.
+- If `coastal_afternoon_forecast_overreach` is present, explicitly treat
+  stale model forecast upside as suspect for coastal stations; prefer the
+  observed-high bucket unless the supplied distribution still leaves a clear
+  adjacent-bucket risk.
 
 ### Practical heuristics
 

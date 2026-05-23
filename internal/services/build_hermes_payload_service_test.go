@@ -403,6 +403,30 @@ func TestBuildHermesPayload(t *testing.T) {
 			t.Errorf("SanityFlags: want late_day_underforecast_tail_guard, got %v", payload.SanityFlags)
 		}
 	})
+
+	t.Run("sanity_flags_coastal_afternoon_forecast_overreach", func(t *testing.T) {
+		s := cleanSummary("ZSPD", "2026-05-21")
+		observedHigh := 25.0
+		latestObserved := 24.0
+		change3h := -1.0
+		remainingHigh := 26.5
+		s.TemperatureProfile = TemperatureProfileCoastalFastLock
+		s.GeneratedAt = time.Date(2026, 5, 21, 6, 31, 0, 0, time.UTC) // 14:31 local
+		s.LatestForecastHighC = 26.8
+		s.ObservedHighSoFarC = &observedHigh
+		s.LatestObservedTempC = &latestObserved
+		s.TempChangeLast3hC = &change3h
+		s.RemainingForecastHighC = &remainingHigh
+		s.ObservationPoints = 30
+
+		payload, err := svc.Build(s, testDist("ZSPD", "2026-05-21"))
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if !containsFlag(payload.SanityFlags, "coastal_afternoon_forecast_overreach") {
+			t.Errorf("SanityFlags: want coastal_afternoon_forecast_overreach, got %v", payload.SanityFlags)
+		}
+	})
 }
 
 // containsFlag reports whether flag appears in flags.

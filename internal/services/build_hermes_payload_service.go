@@ -116,6 +116,13 @@ func computeSanityFlags(s *domain.WeatherFeatureSummary) []string {
 	if observedHigh := effectiveObservedHigh(s); observedHigh != nil && lateDayUnderforecastTailRisk(s, *observedHigh) {
 		flags = append(flags, "late_day_underforecast_tail_guard")
 	}
+	if observedHigh := effectiveObservedHigh(s); observedHigh != nil {
+		localHour := stationLocalHour(s)
+		profile := temperatureProfileConfigFor(s.TemperatureProfile)
+		if coastalAfternoonForecastOverreach(s, *observedHigh, localHour, profile) {
+			flags = append(flags, "coastal_afternoon_forecast_overreach")
+		}
+	}
 
 	return flags
 }

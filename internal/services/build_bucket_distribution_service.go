@@ -150,6 +150,9 @@ func adjustedHigh(s *domain.WeatherFeatureSummary) float64 {
 		if lateDayUnderforecastTailRisk(s, obs) {
 			adj = math.Min(adj, obs+0.05)
 		}
+		if coastalAfternoonForecastOverreach(s, obs, localHour, profile) {
+			adj = math.Min(adj, obs+0.20)
+		}
 		if strongRecentWarming(s) && localHour < profile.strongWarmingUntilHour {
 			adj = math.Max(adj, obs+profile.strongWarmingUpsideC)
 		}
@@ -228,6 +231,8 @@ func computeSpread(s *domain.WeatherFeatureSummary) float64 {
 	case hasObs && historicalResolutionLocked(s, *observedHigh):
 		return profile.hardLockSigma
 	case hasObs && lateDayUnderforecastTailRisk(s, *observedHigh):
+		return profile.hardLockSigma
+	case hasObs && coastalAfternoonForecastOverreach(s, *observedHigh, localHour, profile):
 		return profile.hardLockSigma
 	case hasObs && isHardLocked(localHour, profile) && stableOrCooling(s, *observedHigh) && remainingForecastDoesNotExceedObserved(s, *observedHigh):
 		base = profile.hardLockSigma
@@ -358,6 +363,27 @@ func lateDayUnderforecastTailRisk(s *domain.WeatherFeatureSummary, observedHigh 
 		return false
 	}
 	return true
+}
+
+func coastalAfternoonForecastOverreach(
+	s *domain.WeatherFeatureSummary,
+	observedHigh float64,
+	localHour float64,
+	profile temperatureProfileConfig,
+) bool {
+	if s.TemperatureProfile != TemperatureProfileCoastalFastLock {
+		return false
+	}
+	if localHour < profile.hardLockHour {
+		return false
+	}
+	if s.LatestForecastHighC-observedHigh < 1.5 {
+		return false
+	}
+	if strongRecentWarming(s) {
+		return false
+	}
+	return stableOrCooling(s, observedHigh)
 }
 
 func historicalResolutionLocked(s *domain.WeatherFeatureSummary, observedHigh float64) bool {
